@@ -1,17 +1,35 @@
-# spot_market
+# SpotMarket
 
-A new Flutter project.
+Marketplace móvil de compra y venta local desarrollado con Flutter y Supabase.
 
-## Getting Started
+## Requisitos
+- Flutter SDK y Dart (ver `pubspec.yaml`)
+- Android Studio con un emulador o dispositivo físico
+- Proyecto de Supabase con el esquema de `docs/esquema.sql`
 
-This project is a starting point for a Flutter application.
+## Instalación
+1. `flutter pub get`
+2. Configurar `lib/shared/services/supabase_config.dart` con la URL y la anon key.
+3. `flutter run`
+4. `flutter test`
 
-A few resources to get you started if this is your first Flutter project:
+## Roles
+| Rol | Alcance |
+|---|---|
+| Administrador | Modera publicaciones y gestiona usuarios |
+| Vendedor | Publica y administra productos |
+| Cliente | Explora productos y guarda favoritos (rol base al registrarse) |
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Cuentas demo
+| Rol | Correo | Contraseña |
+|---|---|---|
+| Administrador | admin@spotmarket.com | contra123 |
+| Vendedor | vendedor@spotmarket.com | contra123 |
+| Cliente | cliente@spotmarket.com | contra123 |
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Paquetes de impacto
+| Paquete | Uso |
+|---|---|
+| adaptive_theme | Modo claro/oscuro persistente en toda la app |
+| google_fonts | Tipografía Poppins global |
+| go_router | Navegación y rutas protegidas por rol |
