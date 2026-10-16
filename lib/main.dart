@@ -6,6 +6,9 @@ import 'app.dart';
 import 'shared/services/auth_service.dart';
 import 'shared/services/supabase_config.dart';
 
+import 'shared/services/cola_pendientes.dart';
+import 'shared/services/conectividad_service.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -16,6 +19,8 @@ Future<void> main() async {
 
   // Restaura la sesión y el perfil (con respaldo local) antes de montar la app.
   await AuthService.instancia.iniciar();
+  await ConectividadService.instancia.iniciar();
+  ColaPendientes.instancia.iniciar();
   final temaGuardado = await AdaptiveTheme.getThemeMode();
 
   runApp(SpotMarketApp(temaInicial: temaGuardado));

@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'router/app_router.dart';
 import 'shared/theme/app_theme.dart';
 
+import 'shared/widgets/marco_conexion.dart';
+
 class SpotMarketApp extends StatelessWidget {
   const SpotMarketApp({super.key, this.temaInicial});
 
@@ -21,6 +23,8 @@ class SpotMarketApp extends StatelessWidget {
         theme: claro,
         darkTheme: oscuro,
         routerConfig: appRouter,
+        builder: (context, child) =>
+            MarcoConexion(child: child ?? const SizedBox.shrink()),
       ),
     );
   }
