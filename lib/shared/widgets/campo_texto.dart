@@ -11,6 +11,7 @@ class CampoTexto extends StatelessWidget {
     this.tipoTeclado,
     this.ocultarTexto = false,
     this.sufijo,
+    this.maxLineas = 1,
   });
 
   final TextEditingController controlador;
@@ -20,14 +21,16 @@ class CampoTexto extends StatelessWidget {
   final TextInputType? tipoTeclado;
   final bool ocultarTexto;
   final Widget? sufijo;
+  final int maxLineas;
 
   @override
   Widget build(BuildContext context) {
     return TextFormField(
       controller: controlador,
       validator: validador,
-      keyboardType: tipoTeclado,
+      keyboardType: maxLineas > 1 ? TextInputType.multiline : tipoTeclado,
       obscureText: ocultarTexto,
+      maxLines: ocultarTexto ? 1 : maxLineas,
       decoration: InputDecoration(
         labelText: etiqueta,
         prefixIcon: Icon(icono),

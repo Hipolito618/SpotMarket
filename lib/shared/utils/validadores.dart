@@ -26,4 +26,27 @@ class Validadores {
     }
     return null;
   }
+
+  static String? precio(String? valor) {
+    if (valor == null || valor.trim().isEmpty) {
+      return 'El precio es obligatorio';
+    }
+    final numero = double.tryParse(valor.trim().replaceAll(',', '.'));
+    if (numero == null || numero <= 0) {
+      return 'Ingresa un precio válido mayor a 0';
+    }
+    if (numero >= 100000000) {
+      return 'El precio es demasiado alto';
+    }
+    return null;
+  }
+
+  static String? urlOpcional(String? valor) {
+    if (valor == null || valor.trim().isEmpty) return null;
+    final uri = Uri.tryParse(valor.trim());
+    final valida = uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host.isNotEmpty;
+    return valida ? null : 'Ingresa una URL válida (http o https)';
+  }
 }

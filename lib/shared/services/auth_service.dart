@@ -6,6 +6,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/perfil.dart';
 
+import 'catalogo_controller.dart';
+
 /// Error de autenticación con mensaje listo para mostrar al usuario.
 class AuthFallo implements Exception {
   const AuthFallo(this.mensaje);
@@ -113,8 +115,10 @@ class AuthService extends ChangeNotifier {
 
   Future<void> _limpiarSesionLocal() async {
     _perfil = null;
+    CatalogoController.instancia.limpiar();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_clavePerfilCache);
+
   }
 
   /// Ejecuta una acción y convierte los errores en mensajes en español.

@@ -7,6 +7,9 @@ import '../shared/models/perfil.dart';
 import '../shared/services/auth_service.dart';
 import '../shared/widgets/acceso_denegado_page.dart';
 
+import '../modules/cliente/cliente_shell.dart';
+import '../modules/vendedor/vendedor_page.dart';
+
 /// Rutas exclusivas de cada rol.
 const Map<String, RolUsuario> _rutasProtegidas = {
   '/admin': RolUsuario.administrador,
@@ -57,8 +60,8 @@ final GoRouter appRouter = GoRouter(
     GoRoute(path: '/login', builder: (_, __) => const LoginPage()),
     GoRoute(path: '/registro', builder: (_, __) => const RegisterPage()),
     GoRoute(path: '/admin', builder: (_, __) => const PanelAdminPage()),
-    GoRoute(path: '/vendedor', builder: (_, __) => const PanelVendedorPage()),
-    GoRoute(path: '/cliente', builder: (_, __) => const PanelClientePage()),
+    GoRoute(path: '/vendedor', builder: (_, __) => const VendedorPage()),
+    GoRoute(path: '/cliente', builder: (_, __) => const ClienteShell()),
     GoRoute(
       path: '/acceso-denegado',
       builder: (_, __) => const AccesoDenegadoPage(),
