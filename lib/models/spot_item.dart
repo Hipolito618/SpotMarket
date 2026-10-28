@@ -23,6 +23,8 @@ class SpotItem {
   final LatLng? position;
   final String? description;
   final bool isOpen;
+  final bool hasDelivery;
+  final String? deliveryCost;
 
   const SpotItem({
     required this.id,
@@ -37,6 +39,8 @@ class SpotItem {
     this.position,
     this.description,
     this.isOpen = true,
+    this.hasDelivery = false,
+    this.deliveryCost,
   });
 
   /// Precio con formato estándar en pesos mexicanos
@@ -61,6 +65,8 @@ class SpotItem {
     LatLng? position,
     String? description,
     bool? isOpen,
+    bool? hasDelivery,
+    String? deliveryCost,
   }) {
     return SpotItem(
       id: id ?? this.id,
@@ -75,6 +81,8 @@ class SpotItem {
       position: position ?? this.position,
       description: description ?? this.description,
       isOpen: isOpen ?? this.isOpen,
+      hasDelivery: hasDelivery ?? this.hasDelivery,
+      deliveryCost: deliveryCost ?? this.deliveryCost,
     );
   }
 }

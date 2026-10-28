@@ -1,7 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -12,6 +9,7 @@ import '../../core/controllers/theme_controller.dart';
 import '../../core/theme/app_colors.dart';
 import '../../models/spot_item.dart';
 import '../../widgets/spot_preview_modal.dart';
+import '../spots/add_spot_screen.dart';
 
 enum MarketCategory { todos, antojitos, bazar, abiertoAhora }
 
@@ -28,19 +26,18 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
   StreamSubscription<Position>? _positionStreamSub;
 
-  // Ubicación exacta de referencia en San Luis Potosí (Eje Vial / Centro Histórico)
-  static const LatLng _slpExactLocation = LatLng(22.1515, -100.9722);
+  // Ubicación por defecto de respaldo en San Luis Potosí centro (Lat: 22.1565, Lng: -100.9855)
+  static const LatLng _defaultLocation = LatLng(22.1565, -100.9855);
 
-  LatLng _userLocation = _slpExactLocation;
+  LatLng _userLocation = _defaultLocation;
   bool _hasGpsLocation = false;
-  String _locationStatusText = 'San Luis Potosí (Eje Vial / Centro)';
 
   MarketCategory _selectedCategory = MarketCategory.todos;
   SpotItem? _selectedSpot;
   double _currentSheetSize = 0.18;
 
   // --- PINES DE PRUEBA EN SAN LUIS POTOSÍ ---
-  final List<SpotItem> _spots = const [
+  late final List<SpotItem> _spots = [
     // A) ZONA CENTRO / EJE VIAL / ALAMEDA (Ubicación exacta de la conexión SLP)
     SpotItem(
       id: 'slp_centro_1',
@@ -187,116 +184,221 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   @override
   void dispose() {
     _positionStreamSub?.cancel();
+    _sheetController.dispose();
+    _mapController.dispose();
     super.dispose();
   }
 
-  /// Inicializa permisos y obtiene la posición exacta (GPS o geolocalización de red)
+  /// Inicializa la posición GPS y configura el fallback seguro
   Future<void> _initLocation() async {
-    bool gotPreciseGps = false;
-
-    // 1. Intentar geolocalización de máxima precisión por hardware GPS (móvil/Android/iOS)
     try {
-      final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (serviceEnabled) {
-        LocationPermission permission = await Geolocator.checkPermission();
-        if (permission == LocationPermission.denied) {
-          permission = await Geolocator.requestPermission();
-        }
+      final Position? position = await _determinePosition();
+      if (position != null && mounted) {
+        final LatLng userPos = LatLng(position.latitude, position.longitude);
+        setState(() {
+          _userLocation = userPos;
+          _hasGpsLocation = true;
+        });
+        // Centrado inicial de la cámara al obtener la primera lectura exitosa
+        _mapController.move(userPos, 15.5);
+        _startPositionStream();
+      } else if (mounted) {
+        // Fallback de respaldo en San Luis Potosí centro (Lat: 22.1565, Lng: -100.9855) con zoom 14.5
+        setState(() {
+          _userLocation = _defaultLocation;
+          _hasGpsLocation = false;
+        });
+        _mapController.move(_defaultLocation, 14.5);
+      }
+    } catch (e) {
+      debugPrint('Error en inicialización de ubicación: $e');
+      if (mounted) {
+        setState(() {
+          _userLocation = _defaultLocation;
+          _hasGpsLocation = false;
+        });
+        _mapController.move(_defaultLocation, 14.5);
+      }
+    }
+  }
 
-        if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
-          final Position position = await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(
-              accuracy: LocationAccuracy.bestForNavigation,
-              timeLimit: Duration(seconds: 4),
+  /// Función dedicada: Manejo seguro de permisos y servicio GPS
+  Future<Position?> _determinePosition() async {
+    // 1. Verifica si el servicio de ubicación del dispositivo está activo
+    bool serviceEnabled = false;
+    try {
+      serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    } catch (e) {
+      debugPrint('Error al verificar servicio de ubicación: $e');
+      return null;
+    }
+
+    if (!serviceEnabled) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'El servicio de ubicación GPS está desactivado. Actívalo para ubicarte en el mapa.',
+            ),
+            action: SnackBarAction(
+              label: 'Activar',
+              onPressed: () => Geolocator.openLocationSettings(),
+            ),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+      return null;
+    }
+
+    // 2. Evalúa el estado de permisos
+    LocationPermission permission;
+    try {
+      permission = await Geolocator.checkPermission();
+    } catch (e) {
+      debugPrint('Error al consultar permisos de ubicación: $e');
+      return null;
+    }
+
+    if (permission == LocationPermission.denied) {
+      try {
+        permission = await Geolocator.requestPermission();
+      } catch (e) {
+        debugPrint('Error al solicitar permiso de ubicación: $e');
+        return null;
+      }
+
+      if (permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'Permiso de ubicación denegado. Mostrando vista general en San Luis Potosí.',
+              ),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
           );
-
-          if (mounted) {
-            setState(() {
-              _userLocation = LatLng(position.latitude, position.longitude);
-              _hasGpsLocation = true;
-              _locationStatusText = 'GPS en tiempo real';
-            });
-            _mapController.move(_userLocation, 16.5);
-            gotPreciseGps = true;
-          }
-
-          _startPositionStream();
         }
-      }
-    } catch (e) {
-      debugPrint('Información de geolocalización satelital: $e');
-    }
-
-    // 2. Si el hardware GPS no está disponible o falla (ej. Linux Desktop / Emulador),
-    // obtener la ubicación exacta por red (IP geolocation pública)
-    if (!gotPreciseGps) {
-      try {
-        final netLoc = await _fetchNetworkLocation();
-        if (netLoc != null && mounted) {
-          setState(() {
-            _userLocation = netLoc;
-            _hasGpsLocation = true;
-            _locationStatusText = 'Ubicación exacta detectada';
-          });
-          _mapController.move(_userLocation, 16.5);
-        } else if (mounted) {
-          // Fallback a las coordenadas exactas de San Luis Potosí
-          setState(() {
-            _userLocation = _slpExactLocation;
-            _hasGpsLocation = true;
-          });
-          _mapController.move(_userLocation, 16.5);
-        }
-      } catch (e) {
-        debugPrint('Fallo al consultar ubicación exacta de red: $e');
+        return null;
       }
     }
-  }
 
-  /// Consulta servicio de geolocalización IP para obtener las coordenadas exactas de la conexión
-  Future<LatLng?> _fetchNetworkLocation() async {
-    if (kIsWeb) return null;
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted) {
+        _showPermissionDeniedForeverAlert();
+      }
+      return null;
+    }
+
+    // 3. Con permisos concedidos, obtiene la posición actual con LocationAccuracy.high
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
-      final request = await client.getUrl(Uri.parse('http://ip-api.com/json/'));
-      final response = await request.close().timeout(const Duration(seconds: 3));
-      if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        final data = jsonDecode(body);
-        if (data is Map && data['status'] == 'success') {
-          final lat = (data['lat'] as num).toDouble();
-          final lon = (data['lon'] as num).toDouble();
-          return LatLng(lat, lon);
-        }
-      }
+      return await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
     } catch (e) {
-      debugPrint('Error obteniendo ubicación por red: $e');
+      debugPrint('Timeout o fallo obteniendo coordenadas GPS: $e');
+      return null;
     }
-    return null;
   }
 
-  /// Escucha actualizaciones de posición de máxima precisión
-  void _startPositionStream() {
-    const locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 0,
+  /// Alerta explicando que los permisos de ubicación están deshabilitados permanentemente
+  void _showPermissionDeniedForeverAlert() {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        final isDark = Theme.of(ctx).brightness == Brightness.dark;
+        return AlertDialog(
+          backgroundColor: isDark ? const Color(0xFF22201D) : Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD81B60).withAlpha(30),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.location_off_rounded, color: Color(0xFFD81B60), size: 22),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Ubicación requerida',
+                  style: GoogleFonts.rubik(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            'Los permisos de ubicación están deshabilitados permanentemente. Para poder mostrarte tu posición exacta y los bazares cercanos en el mapa, habilítalos desde los ajustes de la aplicación.',
+            style: GoogleFonts.plusJakartaSans(
+              fontSize: 13.5,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(
+                'Cancelar',
+                style: GoogleFonts.plusJakartaSans(
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? Colors.white70 : Colors.black54,
+                ),
+              ),
+            ),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                Geolocator.openAppSettings();
+              },
+              icon: const Icon(Icons.settings_rounded, size: 18),
+              label: Text(
+                'Abrir Ajustes',
+                style: GoogleFonts.plusJakartaSans(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFF05A24),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
+        );
+      },
     );
+  }
 
+  /// Suscripción al stream de seguimiento en tiempo real con distanceFilter: 10
+  void _startPositionStream() {
     _positionStreamSub?.cancel();
     _positionStreamSub = Geolocator.getPositionStream(
-      locationSettings: locationSettings,
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+      ),
     ).listen(
       (Position position) {
         if (!mounted) return;
         setState(() {
           _userLocation = LatLng(position.latitude, position.longitude);
           _hasGpsLocation = true;
-          _locationStatusText = 'GPS en tiempo real';
         });
       },
       onError: (dynamic error) {
-        debugPrint('Error en stream de posición: $error');
+        debugPrint('Error en stream de seguimiento GPS: $error');
       },
     );
   }
@@ -344,25 +446,58 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   void _onSpotSelected(SpotItem spot) {
     setState(() => _selectedSpot = spot);
     if (spot.position != null) {
-      _mapController.move(spot.position!, 16.5);
+      _mapController.move(spot.position!, 15.5);
     }
     final spotWithExactDist = spot.copyWith(distance: _formatExactDistance(spot));
     SpotPreviewModal.show(context, spotWithExactDist);
   }
 
-  /// Recentra la cámara instantáneamente en la ubicación exacta del usuario
-  void _recenterToUser() {
-    _mapController.move(_userLocation, 16.5);
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Ubicación exacta: ${_userLocation.latitude.toStringAsFixed(4)}, ${_userLocation.longitude.toStringAsFixed(4)} ($_locationStatusText)',
-        ),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
+  /// Recentra la cámara instantáneamente hacia la última coordenada conocida del usuario
+  Future<void> _recenterToUser() async {
+    try {
+      if (_hasGpsLocation) {
+        _mapController.move(_userLocation, 15.5);
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Centrado en tu ubicación GPS (${_userLocation.latitude.toStringAsFixed(4)}, ${_userLocation.longitude.toStringAsFixed(4)})',
+              ),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          );
+        }
+      } else {
+        // Si aún no se cuenta con GPS, intentar determinar la posición
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Buscando señal GPS en tiempo real...'),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 2),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          );
+        }
+        final Position? pos = await _determinePosition();
+        if (pos != null && mounted) {
+          final LatLng newPos = LatLng(pos.latitude, pos.longitude);
+          setState(() {
+            _userLocation = newPos;
+            _hasGpsLocation = true;
+          });
+          _mapController.move(newPos, 15.5);
+          _startPositionStream();
+        } else if (mounted) {
+          _mapController.move(_userLocation, 14.5);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error al recentrar: $e');
+    }
   }
 
   @override
@@ -386,8 +521,8 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: _userLocation,
-              initialZoom: 16.5,
+              initialCenter: _defaultLocation,
+              initialZoom: 14.5,
               onTap: (tapPosition, point) {
                 if (_selectedSpot != null) {
                   setState(() => _selectedSpot = null);
@@ -624,10 +759,30 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    onTap: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
+                    onTap: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      final newSpot = await Navigator.push<SpotItem>(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => AddSpotScreen(initialLocation: _userLocation),
+                        ),
+                      );
+
+                      if (!mounted || newSpot == null) return;
+
+                      setState(() {
+                        _spots.insert(0, newSpot);
+                        _selectedSpot = newSpot;
+                      });
+
+                      if (newSpot.position != null) {
+                        _mapController.move(newSpot.position!, 16.5);
+                      }
+
+                      messenger.hideCurrentSnackBar();
+                      messenger.showSnackBar(
                         SnackBar(
-                          content: const Text('¡Publica tu bazar o antojito en tu colonia!'),
+                          content: Text('¡"${newSpot.title}" agregado con éxito al mapa!'),
                           backgroundColor: primaryColor,
                           behavior: SnackBarBehavior.floating,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

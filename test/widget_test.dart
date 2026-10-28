@@ -8,6 +8,7 @@ import 'package:spot_market/main.dart';
 import 'package:spot_market/core/controllers/theme_controller.dart';
 import 'package:spot_market/models/spot_item.dart';
 import 'package:spot_market/screens/home/map_home_screen.dart';
+import 'package:spot_market/screens/spots/add_spot_screen.dart';
 import 'package:spot_market/widgets/spot_preview_modal.dart';
 
 void main() {
@@ -66,6 +67,11 @@ void main() {
     // Verify floating "+ Vender" button
     expect(find.text('Vender'), findsOneWidget);
     expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+
+    // Verify floating GPS recenter button and tap without crash
+    expect(find.byIcon(Icons.my_location_rounded), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.my_location_rounded));
+    await tester.pump(const Duration(milliseconds: 500));
 
     // Verify DraggableScrollableSheet header
     expect(find.text('Cerca de ti'), findsOneWidget);
@@ -137,6 +143,127 @@ void main() {
     await tester.tap(find.text('Acordar punto de entrega'));
     await tester.pump();
     expect(find.text('Iniciando chat para acordar entrega'), findsOneWidget);
+  });
+
+  testWidgets('AddSpotScreen renders and dynamically toggles fields based on sale type', (WidgetTester tester) async {
+    SpotItem? returnedSpot;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () async {
+                  returnedSpot = await Navigator.push<SpotItem>(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const AddSpotScreen(),
+                    ),
+                  );
+                },
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // Tap to open AddSpotScreen
+    await tester.tap(find.text('Abrir'));
+    await tester.pumpAndSettle();
+
+    // Verify title and main elements
+    expect(find.text('Agregar punto al mapa'), findsOneWidget);
+    expect(find.text('Tipo de venta'), findsOneWidget);
+    expect(find.text('Bazar'), findsOneWidget);
+    expect(find.text('Puesto de\ncomida'), findsOneWidget);
+    expect(find.text('Reventa'), findsOneWidget);
+
+    // Initial selected type is Reventa: check Reventa specific fields
+    expect(find.text('Puntos de entrega (puntos medios)'), findsOneWidget);
+    expect(
+      find.text('Por seguridad, no mostramos tu ubicación exacta, sólo una zona aproximada (300m)'),
+      findsOneWidget,
+    );
+
+    // Switch to 'Puesto de comida'
+    await tester.tap(find.text('Puesto de\ncomida'));
+    await tester.pumpAndSettle();
+
+    // Check Puesto de comida specific fields
+    expect(find.text('Dirección exacta del local o puesto'), findsOneWidget);
+    expect(find.text('Configuración especial'), findsOneWidget);
+    expect(find.text('¿Tiene envíos / a domicilio?'), findsOneWidget);
+
+    // Toggle switch for delivery
+    await tester.ensureVisible(find.byType(Switch));
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+
+    // Fill fields and submit
+    await tester.ensureVisible(find.widgetWithText(TextFormField, 'ej. Calle Morelos #105, frente a la tienda'));
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'ej. Calle Morelos #105, frente a la tienda'),
+      'Calle Hidalgo 300, Centro',
+    );
+    await tester.ensureVisible(find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'));
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+      'Gorditas de Morales con guisado casero',
+    );
+
+    // Tap "Publicar en el mapa"
+    await tester.tap(find.text('Publicar en el mapa'));
+    await tester.pumpAndSettle();
+
+    // Check that spot was returned
+    expect(returnedSpot, isNotNull);
+    expect(returnedSpot!.title, 'Gorditas de Morales con guisado casero');
+    expect(returnedSpot!.category, 'Antojitos');
+    expect(returnedSpot!.exactAddress, 'Calle Hidalgo 300, Centro');
+    expect(returnedSpot!.hasDelivery, isTrue);
+  });
+
+  testWidgets('MapHomeScreen "+ Vender" button opens AddSpotScreen and adds spot to map', (WidgetTester tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: MapHomeScreen(),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 800));
+
+    // Find and tap "+ Vender"
+    expect(find.text('Vender'), findsOneWidget);
+    await tester.tap(find.text('Vender'));
+    await tester.pumpAndSettle();
+
+    // Verify AddSpotScreen is opened
+    expect(find.text('Agregar punto al mapa'), findsOneWidget);
+
+    // Enter description and meeting points for Reventa
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+      'OXXO Carranza esq. Anáhuac',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+      'Chamarra de piel noventera',
+    );
+
+    // Publish
+    await tester.tap(find.text('Publicar en el mapa'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // Verify returning to map and new spot appears in list
+    expect(find.text('Chamarra de piel noventera'), findsAtLeast(1));
+    expect(find.text('¡"Chamarra de piel noventera" agregado con éxito al mapa!'), findsOneWidget);
+
+    // Clean up animation tickers
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(milliseconds: 200));
   });
 }
 
