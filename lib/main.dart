@@ -1,10 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'core/config/supabase_config.dart';
 import 'core/controllers/theme_controller.dart';
 import 'core/theme/app_theme.dart';
 import 'screens/auth/login_screen.dart';
 
-void main() {
+/// Instancia global de SupabaseClient accesible desde toda la aplicación
+final supabase = Supabase.instance.client;
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Inicialización de Supabase con URL y Clave Publicable
+  try {
+    await Supabase.initialize(
+      url: SupabaseConfig.url,
+      // ignore: deprecated_member_use
+      anonKey: SupabaseConfig.anonKey,
+    );
+  } catch (e) {
+    debugPrint('Nota de inicialización de Supabase: $e');
+  }
+
   runApp(const SpotMarketApp());
 }
 

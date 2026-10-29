@@ -8,7 +8,9 @@ import 'package:latlong2/latlong.dart' hide Path;
 import '../../core/controllers/theme_controller.dart';
 import '../../core/theme/app_colors.dart';
 import '../../models/spot_item.dart';
+import '../../services/spot_service.dart';
 import '../../widgets/spot_preview_modal.dart';
+import '../profile/profile_screen.dart';
 import '../spots/add_spot_screen.dart';
 
 enum MarketCategory { todos, antojitos, bazar, abiertoAhora }
@@ -36,8 +38,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   SpotItem? _selectedSpot;
   double _currentSheetSize = 0.18;
 
-  // --- PINES DE PRUEBA EN SAN LUIS POTOSÍ ---
-  late final List<SpotItem> _spots = [
+  // Estado de carga para los spots dinámicos desde Supabase
+  bool _isLoadingSpots = true;
+
+  // --- PINES DE PRUEBA EN SAN LUIS POTOSÍ (RESPALDO Y REFERENCIA) ---
+  static final List<SpotItem> _pinesEjemplo = [
     // A) ZONA CENTRO / EJE VIAL / ALAMEDA (Ubicación exacta de la conexión SLP)
     SpotItem(
       id: 'slp_centro_1',
@@ -175,10 +180,44 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     ),
   ];
 
+  // Lista activa de spots que alimenta el mapa (inicialmente con respaldo, sobreescrita por Supabase)
+  late List<SpotItem> _spots = List.of(_pinesEjemplo);
+
   @override
   void initState() {
     super.initState();
+    _cargarSpotsDesdeSupabase();
     _initLocation();
+  }
+
+  /// Carga dinámica de spots activos desde la base de datos de Supabase
+  Future<void> _cargarSpotsDesdeSupabase() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoadingSpots = true;
+    });
+
+    try {
+      final spotsDb = await SpotService.obtenerSpotsActivos();
+      if (!mounted) return;
+      setState(() {
+        if (spotsDb.isNotEmpty) {
+          _spots = spotsDb;
+        } else if (_spots.isEmpty) {
+          _spots = List.of(_pinesEjemplo);
+        }
+        _isLoadingSpots = false;
+      });
+    } catch (e) {
+      debugPrint('Nota al cargar spots desde Supabase: $e');
+      if (!mounted) return;
+      setState(() {
+        if (_spots.isEmpty) {
+          _spots = List.of(_pinesEjemplo);
+        }
+        _isLoadingSpots = false;
+      });
+    }
   }
 
   @override
@@ -646,6 +685,29 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(),
                         ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const ProfileScreen()),
+                            );
+                          },
+                          child: Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: primaryColor.withAlpha(25),
+                              border: Border.all(color: primaryColor, width: 1.5),
+                            ),
+                            child: Icon(
+                              Icons.person_rounded,
+                              color: primaryColor,
+                              size: 18,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ).animate().fadeIn(duration: 400.ms).slideY(begin: -0.2, end: 0),
@@ -706,11 +768,70 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
             ),
           ),
 
-          // 3. CONTROLES FLOTANTES LATERALES
+          // Indicador sutil de carga de spots desde Supabase
+          if (_isLoadingSpots)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 104,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: surfaceColor.withAlpha(235),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: isDark ? const Color(0xFF38342F) : const Color(0xFFEBE6DC),
+                      width: 1,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha(25),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Actualizando spots...',
+                        style: GoogleFonts.plusJakartaSans(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // 3. CONTROLES FLOTANTES LATERALES (Ubicación GPS, Modo Claro/Oscuro y + Vender)
+          // Se elevan dinámicamente por encima de la hoja deslizable para evitar solapamientos y corregir el bug visual
           AnimatedPositioned(
             duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
             right: 16,
-            bottom: (_currentSheetSize > 0.3) ? -100 : 160,
+            bottom: () {
+              final screenHeight = MediaQuery.of(context).size.height;
+              final sheetHeight = screenHeight * _currentSheetSize;
+              // Si la hoja se expande a pantalla casi completa (> 70%), se ocultan sutilmente para lectura limpia
+              if (_currentSheetSize > 0.70) return -120.0;
+              // En estado replegado o intermedio, se mantienen flotando bien visibles sobre la hoja
+              return (sheetHeight + 20.0).clamp(220.0, (screenHeight - 260.0).clamp(220.0, double.infinity));
+            }(),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -760,34 +881,29 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                   color: Colors.transparent,
                   child: InkWell(
                     onTap: () async {
-                      final messenger = ScaffoldMessenger.of(context);
-                      final newSpot = await Navigator.push<SpotItem>(
+                      final result = await Navigator.push<dynamic>(
                         context,
                         MaterialPageRoute(
                           builder: (_) => AddSpotScreen(initialLocation: _userLocation),
                         ),
                       );
 
-                      if (!mounted || newSpot == null) return;
+                      if (!mounted || result == null) return;
 
-                      setState(() {
-                        _spots.insert(0, newSpot);
-                        _selectedSpot = newSpot;
-                      });
+                      if (result is SpotItem) {
+                        setState(() {
+                          _spots.removeWhere((s) => s.id == result.id);
+                          _spots.insert(0, result);
+                          _selectedSpot = result;
+                        });
 
-                      if (newSpot.position != null) {
-                        _mapController.move(newSpot.position!, 16.5);
+                        if (result.position != null) {
+                          _mapController.move(result.position!, 16.5);
+                        }
                       }
 
-                      messenger.hideCurrentSnackBar();
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text('¡"${newSpot.title}" agregado con éxito al mapa!'),
-                          backgroundColor: primaryColor,
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      );
+                      // Refresca la lista dinámica de spots desde Supabase
+                      await _cargarSpotsDesdeSupabase();
                     },
                     borderRadius: BorderRadius.circular(30),
                     child: Container(

@@ -1,9 +1,13 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' hide Path;
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_colors.dart';
-import '../../models/spot_item.dart';
+import '../../services/spot_service.dart';
 
 /// Tipos de venta seleccionables en el formulario
 enum SaleType { bazar, food, reseller }
@@ -11,6 +15,14 @@ enum SaleType { bazar, food, reseller }
 /// Pantalla para registrar y publicar un nuevo punto o bazar en el mapa
 class AddSpotScreen extends StatefulWidget {
   final LatLng? initialLocation;
+
+  /// Hook para pruebas unitarias: inyecta archivos iniciales sin requerir image_picker nativo
+  @visibleForTesting
+  static List<XFile>? mockInitialFiles;
+
+  /// Hook para pruebas unitarias: simula selección de archivos desde la galería
+  @visibleForTesting
+  static Future<List<XFile>> Function()? mockPickImages;
 
   const AddSpotScreen({
     super.key,
@@ -24,6 +36,9 @@ class AddSpotScreen extends StatefulWidget {
 class _AddSpotScreenState extends State<AddSpotScreen> {
   final _formKey = GlobalKey<FormState>();
 
+  // Estado de carga durante la persistencia en Supabase
+  bool _isPublishing = false;
+
   // Tipo de venta activo (por defecto Reventa como en la captura de modo claro)
   SaleType _selectedType = SaleType.reseller;
 
@@ -32,38 +47,43 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
   final TextEditingController _exactAddressController = TextEditingController();
   final TextEditingController _descriptionController = TextEditingController();
   final TextEditingController _deliveryCostController = TextEditingController();
+  final TextEditingController _priceController = TextEditingController();
 
   // Configuración especial para Puesto de comida
   bool _hasDelivery = false;
 
-  // Coordenada central del mapa miniatura
-  late LatLng _mapCenter;
+  // Ubicación seleccionada en el mapa interactivo
+  late LatLng _selectedLocation;
 
-  // Fotos seleccionadas (máximo 5)
-  final List<String> _photos = [];
+  // Controlador del mapa interactivo miniatura
+  final MapController _miniMapController = MapController();
 
-  // Banco de imágenes de muestra para demostración rápida al pulsar la cámara
-  final List<String> _sampleImages = const [
-    'https://images.unsplash.com/photo-1551782450-a2132b4ba21d?w=300&q=80',
-    'https://images.unsplash.com/photo-1489987707025-afc232f7ea0f?w=300&q=80',
-    'https://images.unsplash.com/photo-1501443762994-82bd5dace89a?w=300&q=80',
-    'https://images.unsplash.com/photo-1588702547923-7093a6c3ba33?w=300&q=80',
-    'https://images.unsplash.com/photo-1539185441755-769473a23570?w=300&q=80',
-  ];
+  // Selector de imágenes de la galería del dispositivo
+  final ImagePicker _imagePicker = ImagePicker();
+
+  // Lista de archivos de fotos seleccionadas (máximo 5)
+  final List<XFile> _selectedFiles = [];
 
   @override
   void initState() {
     super.initState();
     // Centra en la ubicación recibida o en Colonia Popular / San Luis Potosí
-    _mapCenter = widget.initialLocation ?? const LatLng(22.1630, -100.9605);
+    _selectedLocation = widget.initialLocation ?? const LatLng(22.1630, -100.9605);
+
+    // Inyección de archivos para pruebas unitarias si aplica
+    if (AddSpotScreen.mockInitialFiles != null) {
+      _selectedFiles.addAll(AddSpotScreen.mockInitialFiles!);
+    }
   }
 
   @override
   void dispose() {
+    _miniMapController.dispose();
     _meetingPointsController.dispose();
     _exactAddressController.dispose();
     _descriptionController.dispose();
     _deliveryCostController.dispose();
+    _priceController.dispose();
     super.dispose();
   }
 
@@ -83,8 +103,9 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
     return baseColor.withAlpha(isDark ? 36 : 22);
   }
 
-  void _addPhoto() {
-    if (_photos.length >= 5) {
+  /// Abre la galería para seleccionar una o varias imágenes locales
+  Future<void> _pickImages() async {
+    if (_selectedFiles.length >= 5) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Has alcanzado el límite máximo de 5 fotos.'),
@@ -93,21 +114,96 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       );
       return;
     }
-    setState(() {
-      _photos.add(_sampleImages[_photos.length % _sampleImages.length]);
-    });
+
+    try {
+      if (AddSpotScreen.mockPickImages != null) {
+        final mockPicked = await AddSpotScreen.mockPickImages!();
+        if (mockPicked.isNotEmpty) {
+          setState(() {
+            final remaining = 5 - _selectedFiles.length;
+            _selectedFiles.addAll(mockPicked.take(remaining));
+          });
+        }
+        return;
+      }
+
+      final remainingSlots = 5 - _selectedFiles.length;
+      final pickedList = await _imagePicker.pickMultiImage(
+        limit: remainingSlots,
+        imageQuality: 85,
+      );
+
+      if (pickedList.isNotEmpty) {
+        setState(() {
+          _selectedFiles.addAll(pickedList.take(remainingSlots));
+        });
+      }
+    } catch (e) {
+      debugPrint('Error al seleccionar imágenes múltiples: $e');
+      // Intentar fallback a selección individual si pickMultiImage no estuviera disponible
+      try {
+        final single = await _imagePicker.pickImage(
+          source: ImageSource.gallery,
+          imageQuality: 85,
+        );
+        if (single != null) {
+          setState(() {
+            _selectedFiles.add(single);
+          });
+        }
+      } catch (inner) {
+        debugPrint('Error en fallback de imagen: $inner');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('No se pudieron seleccionar fotos: $inner'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }
   }
 
   void _removePhoto(int index) {
     setState(() {
-      _photos.removeAt(index);
+      _selectedFiles.removeAt(index);
     });
   }
 
-  void _publishSpot() {
+  /// Valida los datos y persiste el punto junto con sus fotos en Supabase
+  Future<void> _publishSpot() async {
+    if (_isPublishing) return;
+
     final isReseller = _selectedType == SaleType.reseller;
 
-    // 1. Validaciones según el tipo seleccionado
+    // 1. Validación de coordenadas válidas
+    if (_selectedLocation.latitude == 0 && _selectedLocation.longitude == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Por favor selecciona una ubicación válida sobre el mapa.'),
+          backgroundColor: AppColors.lightPrimary,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+      return;
+    }
+
+    // 2. Validación de al menos una fotografía seleccionada
+    if (_selectedFiles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Por favor agrega al menos una foto de tu producto o puesto.'),
+          backgroundColor: AppColors.lightPrimary,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+      return;
+    }
+
+    // 3. Validaciones según el tipo seleccionado
     if (isReseller && _meetingPointsController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -144,7 +240,7 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       return;
     }
 
-    // 2. Extraer o componer título amigable
+    // 4. Extraer o componer título amigable
     String title = _descriptionController.text.trim();
     if (title.contains('\n')) {
       title = title.split('\n').first.trim();
@@ -158,50 +254,91 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
           : (_selectedType == SaleType.bazar ? 'Bazar de colonia' : 'Reventa de artículos');
     }
 
-    // 3. Resolver categoría y tipo
+    // 5. Resolver categoría y tipo
     final String category = _selectedType == SaleType.food
         ? 'Antojitos'
         : (_selectedType == SaleType.bazar ? 'Bazar' : 'Segunda mano');
 
-    final SpotType spotType = isReseller ? SpotType.reseller : SpotType.localBusiness;
+    final String tipoStr = _selectedType == SaleType.food
+        ? 'comida'
+        : (_selectedType == SaleType.bazar ? 'bazar' : 'reventa');
 
-    // 4. Imagen principal
-    final String imageUrl = _photos.isNotEmpty
-        ? _photos.first
-        : (_selectedType == SaleType.food
-            ? 'https://images.unsplash.com/photo-1551782450-a2132b4ba21d?w=300&q=80'
-            : (_selectedType == SaleType.bazar
-                ? 'https://images.unsplash.com/photo-1489987707025-afc232f7ea0f?w=300&q=80'
-                : 'https://images.unsplash.com/photo-1588702547923-7093a6c3ba33?w=300&q=80'));
+    setState(() {
+      _isPublishing = true;
+    });
 
-    // 5. Instanciar SpotItem
-    final newSpot = SpotItem(
-      id: 'spot_${DateTime.now().millisecondsSinceEpoch}',
-      title: title,
-      price: 40.0,
-      type: spotType,
-      category: category,
-      distance: 'a 50 m',
-      exactAddress: !isReseller ? _exactAddressController.text.trim() : null,
-      meetingPoints: isReseller
-          ? _meetingPointsController.text
-              .trim()
-              .split(',')
-              .map((p) => p.trim())
-              .where((p) => p.isNotEmpty)
-              .toList()
-          : null,
-      imageUrl: imageUrl,
-      position: _mapCenter,
-      description: _descriptionController.text.trim(),
-      isOpen: true,
-      hasDelivery: _hasDelivery,
-      deliveryCost: _hasDelivery && _deliveryCostController.text.trim().isNotEmpty
-          ? _deliveryCostController.text.trim()
-          : null,
-    );
+    try {
+      // Paso A: Subir archivos de imágenes a Supabase Storage (bucket 'spots-media')
+      final uploadedUrls = await SpotService.subirImagenesStorage(_selectedFiles);
 
-    Navigator.pop(context, newSpot);
+      // Extraer precio especificado por el usuario o usar 40.0 como valor base
+      final priceClean = _priceController.text.trim().replaceAll('\$', '').replaceAll(',', '');
+      final double resolvedPrice = double.tryParse(priceClean) ?? 40.0;
+
+      // Paso B: Publicar en la base de datos Supabase (Spot, Detalle y Foto_spot)
+      final createdSpot = await SpotService.publicarSpot(
+        titulo: title,
+        precio: resolvedPrice,
+        latitud: _selectedLocation.latitude,
+        longitud: _selectedLocation.longitude,
+        tipo: tipoStr,
+        categoriaNombre: category,
+        descripcion: _descriptionController.text.trim(),
+        direccionExacta: !isReseller ? _exactAddressController.text.trim() : null,
+        tieneEnvio: _selectedType == SaleType.food ? _hasDelivery : null,
+        costoEnvio: (_selectedType == SaleType.food && _hasDelivery)
+            ? _deliveryCostController.text.trim()
+            : null,
+        horario: _selectedType == SaleType.bazar ? '10:00 - 18:00' : null,
+        radioAprox: 300.0,
+        zonaReferencia: isReseller ? _meetingPointsController.text.trim() : null,
+        fotosUrls: uploadedUrls,
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('¡Punto publicado exitosamente en el mapa!'),
+          backgroundColor: const Color(0xFF1B7F4B),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+
+      Navigator.pop(context, createdSpot);
+    } on PostgrestException catch (e) {
+      debugPrint('Error de PostgREST al publicar spot: ${e.message} (código: ${e.code})');
+      if (!mounted) return;
+      setState(() {
+        _isPublishing = false;
+      });
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error al publicar: ${e.message}'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Error al publicar spot en Supabase: $e');
+      if (!mounted) return;
+      setState(() {
+        _isPublishing = false;
+      });
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error al publicar: ${e.toString()}'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
   }
 
   @override
@@ -331,12 +468,13 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
 
                         const SizedBox(height: 14),
 
-                        // Miniatura de mapa con círculo translúcido (~300m)
-                        _buildMiniMapPreview(
+                        // Selector interactivo de mapa con círculo de zona (~300m)
+                        _buildInteractiveMapSelector(
                           isDark: isDark,
                           isReseller: true,
                           activeColor: activeColor,
                           textPrimary: textPrimary,
+                          textSecondary: textSecondary,
                         ),
 
                         const SizedBox(height: 12),
@@ -375,12 +513,13 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
 
                         const SizedBox(height: 14),
 
-                        // Miniatura de mapa con pin exacto
-                        _buildMiniMapPreview(
+                        // Selector interactivo de mapa con pin exacto
+                        _buildInteractiveMapSelector(
                           isDark: isDark,
                           isReseller: false,
                           activeColor: activeColor,
                           textPrimary: textPrimary,
+                          textSecondary: textSecondary,
                         ),
 
                         // Sección adicional para Puesto de comida: Configuración especial
@@ -432,146 +571,55 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
 
                       const SizedBox(height: 22),
 
-                      // --- 4. AGREGAR FOTOS (MÁX. 5) ---
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: surfaceBg,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: borderColor, width: 1),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              height: 84,
-                              child: ListView(
-                                scrollDirection: Axis.horizontal,
-                                physics: const BouncingScrollPhysics(),
-                                children: [
-                                  // Botón inicial de agregar cámara
-                                  InkWell(
-                                    onTap: _addPhoto,
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: Container(
-                                      width: 90,
-                                      height: 84,
-                                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                                      decoration: BoxDecoration(
-                                        color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFF7F5F0),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                          color: isDark ? const Color(0xFF433E37) : const Color(0xFFE2DDD5),
-                                          width: 1,
-                                        ),
-                                      ),
-                                      child: Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          Icon(
-                                            Icons.camera_alt_outlined,
-                                            size: 24,
-                                            color: textPrimary,
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            'Agregar fotos\n(máx. 5)',
-                                            textAlign: TextAlign.center,
-                                            style: GoogleFonts.plusJakartaSans(
-                                              fontSize: 9.5,
-                                              fontWeight: FontWeight.w600,
-                                              color: textSecondary,
-                                              height: 1.1,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-
-                                  const SizedBox(width: 10),
-
-                                  // Previsualizaciones de fotos agregadas
-                                  ..._photos.asMap().entries.map((entry) {
-                                    final index = entry.key;
-                                    final url = entry.value;
-
-                                    return Padding(
-                                      padding: const EdgeInsets.only(right: 10),
-                                      child: Stack(
-                                        clipBehavior: Clip.none,
-                                        children: [
-                                          ClipRRect(
-                                            borderRadius: BorderRadius.circular(12),
-                                            child: SizedBox(
-                                              width: 72,
-                                              height: 84,
-                                              child: Image.network(
-                                                url,
-                                                fit: BoxFit.cover,
-                                                errorBuilder: (context, error, stackTrace) => Container(
-                                                  color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFF7F5F0),
-                                                  child: Icon(Icons.image_outlined, color: textSecondary),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          Positioned(
-                                            top: -6,
-                                            right: -6,
-                                            child: GestureDetector(
-                                              onTap: () => _removePhoto(index),
-                                              child: Container(
-                                                padding: const EdgeInsets.all(3),
-                                                decoration: const BoxDecoration(
-                                                  color: Color(0xFFD81B60),
-                                                  shape: BoxShape.circle,
-                                                ),
-                                                child: const Icon(
-                                                  Icons.close_rounded,
-                                                  color: Colors.white,
-                                                  size: 13,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  }),
-
-                                  // Ranuras de reserva vacías (para completar hasta 5)
-                                  ...List.generate(
-                                    (4 - _photos.length).clamp(0, 4),
-                                    (i) => Padding(
-                                      padding: const EdgeInsets.only(right: 10),
-                                      child: Container(
-                                        width: 72,
-                                        height: 84,
-                                        decoration: BoxDecoration(
-                                          color: isDark ? const Color(0xFF1E1C1A) : const Color(0xFFF9F7F3),
-                                          borderRadius: BorderRadius.circular(12),
-                                          border: Border.all(
-                                            color: isDark ? const Color(0xFF33302B) : const Color(0xFFE8E4DC),
-                                            width: 1,
-                                            strokeAlign: BorderSide.strokeAlignCenter,
-                                          ),
-                                        ),
-                                        child: Center(
-                                          child: Icon(
-                                            Icons.image_outlined,
-                                            size: 22,
-                                            color: textSecondary.withAlpha(90),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
+                      // --- 4. PRECIO ESTIMADO ---
+                      Row(
+                        children: [
+                          Text(
+                            'Precio (MXN)',
+                            style: GoogleFonts.plusJakartaSans(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: textPrimary,
                             ),
-                          ],
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '(opcional)',
+                            style: GoogleFonts.plusJakartaSans(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w500,
+                              color: textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      _buildCustomTextField(
+                        controller: _priceController,
+                        hintText: 'ej. 45 o 120',
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        prefixIcon: Icon(
+                          Icons.attach_money_rounded,
+                          color: activeColor,
+                          size: 20,
                         ),
+                        inputBg: inputBg,
+                        borderColor: borderColor,
+                        activeColor: activeColor,
+                        textPrimary: textPrimary,
+                        textSecondary: textSecondary,
+                      ),
+
+                      const SizedBox(height: 22),
+
+                      // --- 5. SELECCIÓN DE FOTOS (IMAGE_PICKER / MÁX. 5) ---
+                      _buildPhotoSelectionSection(
+                        isDark: isDark,
+                        surfaceBg: surfaceBg,
+                        borderColor: borderColor,
+                        textPrimary: textPrimary,
+                        textSecondary: textSecondary,
+                        activeColor: activeColor,
                       ),
 
                       const SizedBox(height: 28),
@@ -598,23 +646,33 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
                 width: double.infinity,
                 height: 52,
                 child: ElevatedButton(
-                  onPressed: _publishSpot,
+                  onPressed: _isPublishing ? null : _publishSpot,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: primaryColor,
+                    disabledBackgroundColor: primaryColor.withAlpha(160),
                     foregroundColor: Colors.white,
                     elevation: 2,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(26),
                     ),
                   ),
-                  child: Text(
-                    'Publicar en el mapa',
-                    style: GoogleFonts.rubik(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
-                  ),
+                  child: _isPublishing
+                      ? const SizedBox(
+                          height: 22,
+                          width: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.5,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : Text(
+                          'Publicar en el mapa',
+                          style: GoogleFonts.rubik(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -709,13 +767,13 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
           ),
         );
       case SaleType.food:
-        return SizedBox(
+        return const SizedBox(
           width: 34,
           height: 34,
           child: Center(
             child: Text(
               '🌮',
-              style: const TextStyle(fontSize: 24),
+              style: TextStyle(fontSize: 24),
             ),
           ),
         );
@@ -740,10 +798,13 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
     required Color textPrimary,
     required Color textSecondary,
     int maxLines = 1,
+    TextInputType? keyboardType,
+    Widget? prefixIcon,
   }) {
     return TextFormField(
       controller: controller,
       maxLines: maxLines,
+      keyboardType: keyboardType,
       style: GoogleFonts.plusJakartaSans(
         fontSize: 14,
         color: textPrimary,
@@ -751,6 +812,7 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       ),
       decoration: InputDecoration(
         hintText: hintText,
+        prefixIcon: prefixIcon,
         hintStyle: GoogleFonts.plusJakartaSans(
           fontSize: 13.5,
           color: textSecondary.withAlpha(160),
@@ -775,111 +837,517 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
     );
   }
 
-  /// Miniatura de mapa integrada para visualización de zona o pin exacto
-  Widget _buildMiniMapPreview({
+  /// Selector interactivo de ubicación sobre el mapa con flutter_map
+  Widget _buildInteractiveMapSelector({
     required bool isDark,
     required bool isReseller,
     required Color activeColor,
     required Color textPrimary,
+    required Color textSecondary,
   }) {
     const tileUrl = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        height: 140,
-        decoration: BoxDecoration(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isDark ? const Color(0xFF38342F) : const Color(0xFFE0DCD5),
-            width: 1,
-          ),
-        ),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            FlutterMap(
-              options: MapOptions(
-                initialCenter: _mapCenter,
-                initialZoom: 15.0,
-                interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.none,
-                ),
+          child: Container(
+            height: 220,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isDark ? const Color(0xFF38342F) : const Color(0xFFE0DCD5),
+                width: 1.2,
               ),
-              children: [
-                TileLayer(
-                  urlTemplate: tileUrl,
-                  userAgentPackageName: 'com.spotmarket.app',
-                  tileBuilder: isDark
-                      ? (context, tileWidget, tile) {
-                          return ColorFiltered(
-                            colorFilter: const ColorFilter.matrix(<double>[
-                              -0.80, 0, 0, 0, 240,
-                              0, -0.80, 0, 0, 235,
-                              0, 0, -0.80, 0, 225,
-                              0, 0, 0, 1, 0,
-                            ]),
-                            child: tileWidget,
-                          );
-                        }
-                      : null,
-                ),
-                if (isReseller)
-                  CircleLayer(
-                    circles: [
-                      CircleMarker(
-                        point: _mapCenter,
-                        radius: 54, // Representación visual de 300m
-                        useRadiusInMeter: false,
-                        color: Colors.black.withAlpha(isDark ? 55 : 35),
-                        borderColor: isDark ? Colors.white70 : Colors.black87,
-                        borderStrokeWidth: 1.6,
-                      ),
-                    ],
-                  )
-                else
-                  MarkerLayer(
-                    markers: [
-                      Marker(
-                        point: _mapCenter,
-                        width: 38,
-                        height: 38,
-                        child: Icon(
-                          Icons.location_on_rounded,
-                          color: activeColor,
-                          size: 38,
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
             ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // Mapa interactivo con soporte para arrastre y tap to place
+                FlutterMap(
+                  mapController: _miniMapController,
+                  options: MapOptions(
+                    initialCenter: _selectedLocation,
+                    initialZoom: 15.5,
+                    minZoom: 11.0,
+                    maxZoom: 18.0,
+                    interactionOptions: const InteractionOptions(
+                      flags: InteractiveFlag.drag | InteractiveFlag.pinchZoom | InteractiveFlag.doubleTapZoom,
+                    ),
+                    onTap: (tapPosition, point) {
+                      setState(() {
+                        _selectedLocation = point;
+                      });
+                      _miniMapController.move(point, _miniMapController.camera.zoom);
+                    },
+                    onPositionChanged: (camera, hasGesture) {
+                      if (hasGesture) {
+                        setState(() {
+                          _selectedLocation = camera.center;
+                        });
+                      }
+                    },
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate: tileUrl,
+                      userAgentPackageName: 'com.spotmarket.app',
+                      tileBuilder: isDark
+                          ? (context, tileWidget, tile) {
+                              return ColorFiltered(
+                                colorFilter: const ColorFilter.matrix(<double>[
+                                  -0.80, 0, 0, 0, 240,
+                                  0, -0.80, 0, 0, 235,
+                                  0, 0, -0.80, 0, 225,
+                                  0, 0, 0, 1, 0,
+                                ]),
+                                child: tileWidget,
+                              );
+                            }
+                          : null,
+                    ),
 
-            // Etiqueta de la colonia en el centro para Reventa
-            if (isReseller)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xDD141311) : const Color(0xEEFFFFFF),
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withAlpha(30),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
+                    // Círculo translúcido de ~300m para reventa
+                    if (isReseller)
+                      CircleLayer(
+                        circles: [
+                          CircleMarker(
+                            point: _selectedLocation,
+                            radius: 300,
+                            useRadiusInMeter: true,
+                            color: activeColor.withAlpha(isDark ? 45 : 30),
+                            borderColor: activeColor.withAlpha(isDark ? 180 : 160),
+                            borderStrokeWidth: 2,
+                          ),
+                        ],
+                      ),
+
+                    // Marcador central en el punto seleccionado
+                    MarkerLayer(
+                      markers: [
+                        Marker(
+                          point: _selectedLocation,
+                          width: 44,
+                          height: 44,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Container(
+                                width: 38,
+                                height: 38,
+                                decoration: BoxDecoration(
+                                  color: activeColor,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: activeColor.withAlpha(120),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 3),
+                                    ),
+                                  ],
+                                ),
+                                child: Icon(
+                                  isReseller
+                                      ? Icons.handshake_rounded
+                                      : (_selectedType == SaleType.food
+                                          ? Icons.restaurant_rounded
+                                          : Icons.storefront_rounded),
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-                child: Text(
-                  'Colonia Popular',
-                  style: GoogleFonts.plusJakartaSans(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: textPrimary,
+
+                // Chip superior de guía interactiva
+                Positioned(
+                  top: 10,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xCC1A1816) : const Color(0xEEFFFFFF),
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withAlpha(25),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                      border: Border.all(
+                        color: isDark ? const Color(0xFF38342F) : const Color(0xFFE5E0D8),
+                        width: 1,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.touch_app_rounded,
+                          size: 13,
+                          color: activeColor,
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          isReseller
+                              ? 'Zona aproximada (toca o arrastra)'
+                              : 'Toca o arrastra para ubicar el punto',
+                          style: GoogleFonts.plusJakartaSans(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
+
+                // Etiqueta flotante de zona / colonia en el centro para Reventa
+                if (isReseller)
+                  Positioned(
+                    bottom: 12,
+                    left: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xDD141311) : const Color(0xEEFFFFFF),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withAlpha(30),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        'Colonia Popular',
+                        style: GoogleFonts.plusJakartaSans(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: textPrimary,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Botón flotante para recentrar ubicación
+                Positioned(
+                  bottom: 10,
+                  right: 10,
+                  child: Material(
+                    color: isDark ? const Color(0xFF262421) : Colors.white,
+                    elevation: 3,
+                    shape: const CircleBorder(),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () {
+                        final target = widget.initialLocation ?? const LatLng(22.1630, -100.9605);
+                        _miniMapController.move(target, 15.5);
+                        setState(() {
+                          _selectedLocation = target;
+                        });
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(9),
+                        child: Icon(
+                          Icons.my_location_rounded,
+                          size: 20,
+                          color: activeColor,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 8),
+
+        // Coordenadas actuales capturadas
+        Row(
+          children: [
+            Icon(
+              Icons.pin_drop_rounded,
+              size: 14,
+              color: textSecondary,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Coordenadas: Lat ${_selectedLocation.latitude.toStringAsFixed(4)}, Lng ${_selectedLocation.longitude.toStringAsFixed(4)}',
+              style: GoogleFonts.plusJakartaSans(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w500,
+                color: textSecondary,
               ),
+            ),
           ],
+        ),
+      ],
+    );
+  }
+
+  /// Selector horizontal de fotos locales del dispositivo (image_picker)
+  Widget _buildPhotoSelectionSection({
+    required bool isDark,
+    required Color surfaceBg,
+    required Color borderColor,
+    required Color textPrimary,
+    required Color textSecondary,
+    required Color activeColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: surfaceBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor, width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Fotos del producto / puesto',
+                style: GoogleFonts.plusJakartaSans(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: textPrimary,
+                ),
+              ),
+              Text(
+                '${_selectedFiles.length} / 5',
+                style: GoogleFonts.plusJakartaSans(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: textSecondary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 88,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              children: [
+                // Botón de tarjeta punteada/icono '+' para "Agregar fotos" desde la galería
+                if (_selectedFiles.length < 5)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: InkWell(
+                      onTap: _pickImages,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        width: 84,
+                        height: 86,
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFF7F5F0),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: activeColor.withAlpha(isDark ? 140 : 100),
+                            width: 1.2,
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.add_photo_alternate_outlined,
+                              size: 22,
+                              color: activeColor,
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              'Agregar fotos\n(máx. 5)',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.plusJakartaSans(
+                                fontSize: 9.0,
+                                fontWeight: FontWeight.w600,
+                                color: textSecondary,
+                                height: 1.1,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Miniaturas cuadradas redondeadas (80x80 px aprox.)
+                ..._selectedFiles.asMap().entries.map((entry) {
+                  final index = entry.key;
+                  final file = entry.value;
+
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Container(
+                            width: 80,
+                            height: 86,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: index == 0
+                                    ? activeColor
+                                    : (isDark ? const Color(0xFF433E37) : const Color(0xFFE2DDD5)),
+                                width: index == 0 ? 1.6 : 1.0,
+                              ),
+                            ),
+                            child: _buildImageThumbnail(file, isDark),
+                          ),
+                        ),
+
+                        // Badge distintivo "Portada" en la primera foto seleccionada (índice 0)
+                        if (index == 0)
+                          Positioned(
+                            bottom: 4,
+                            left: 4,
+                            right: 4,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF05A24),
+                                borderRadius: BorderRadius.circular(4),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.black26,
+                                    blurRadius: 4,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                              child: const Text(
+                                'Portada',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.3,
+                                ),
+                              ),
+                            ),
+                          ),
+
+                        // Botón de cruz/eliminar ('x') en cada miniatura para remover fotos individuales
+                        Positioned(
+                          top: -5,
+                          right: -5,
+                          child: GestureDetector(
+                            onTap: () => _removePhoto(index),
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFD81B60),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black26,
+                                    blurRadius: 4,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.close_rounded,
+                                color: Colors.white,
+                                size: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+
+                // Ranuras de reserva vacías (para completar hasta 5)
+                ...List.generate(
+                  (5 - _selectedFiles.length - (_selectedFiles.length < 5 ? 1 : 0)).clamp(0, 4),
+                  (i) => Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Container(
+                      width: 76,
+                      height: 86,
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E1C1A) : const Color(0xFFF9F7F3),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isDark ? const Color(0xFF33302B) : const Color(0xFFE8E4DC),
+                          width: 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: Icon(
+                          Icons.image_outlined,
+                          size: 22,
+                          color: textSecondary.withAlpha(90),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Construye la vista previa de la imagen local según su ruta y plataforma
+  Widget _buildImageThumbnail(XFile file, bool isDark) {
+    if (kIsWeb ||
+        file.path.startsWith('http://') ||
+        file.path.startsWith('https://') ||
+        file.path.startsWith('blob:')) {
+      return Image.network(
+        file.path,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => _buildImageFallback(isDark),
+      );
+    }
+
+    final ioFile = File(file.path);
+    if (ioFile.existsSync()) {
+      return Image.file(
+        ioFile,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => _buildImageFallback(isDark),
+      );
+    }
+
+    // Fallback para entornos de testing o rutas virtuales
+    return _buildImageFallback(isDark);
+  }
+
+  Widget _buildImageFallback(bool isDark) {
+    return Container(
+      color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFF5EFEB),
+      child: Center(
+        child: Icon(
+          Icons.image_rounded,
+          size: 28,
+          color: isDark ? const Color(0xFF8C827A) : const Color(0xFFB3A89F),
         ),
       ),
     );

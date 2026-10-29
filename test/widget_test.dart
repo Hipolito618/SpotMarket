@@ -3,13 +3,21 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:latlong2/latlong.dart' hide Path;
 import 'package:spot_market/main.dart';
 import 'package:spot_market/core/controllers/theme_controller.dart';
 import 'package:spot_market/models/spot_item.dart';
+import 'package:spot_market/screens/auth/register_screen.dart';
 import 'package:spot_market/screens/home/map_home_screen.dart';
+import 'package:spot_market/screens/profile/profile_screen.dart';
 import 'package:spot_market/screens/spots/add_spot_screen.dart';
+import 'package:spot_market/services/spot_service.dart';
+import 'package:spot_market/services/user_service.dart';
 import 'package:spot_market/widgets/spot_preview_modal.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
   setUpAll(() {
@@ -18,6 +26,18 @@ void main() {
 
   tearDownAll(() {
     HttpOverrides.global = null;
+  });
+
+  setUp(() {
+    AddSpotScreen.mockInitialFiles = [XFile('test/mock_foto.jpg')];
+  });
+
+  tearDown(() {
+    AddSpotScreen.mockInitialFiles = null;
+    AddSpotScreen.mockPickImages = null;
+    UserService.mockObtenerPerfil = null;
+    UserService.mockObtenerSpots = null;
+    UserService.mockSignOut = null;
   });
 
   testWidgets('spotMarket smoke test and theme toggle', (WidgetTester tester) async {
@@ -259,11 +279,804 @@ void main() {
 
     // Verify returning to map and new spot appears in list
     expect(find.text('Chamarra de piel noventera'), findsAtLeast(1));
-    expect(find.text('¡"Chamarra de piel noventera" agregado con éxito al mapa!'), findsOneWidget);
+    expect(find.text('¡Punto publicado exitosamente en el mapa!'), findsOneWidget);
 
     // Clean up animation tickers
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(milliseconds: 200));
+  });
+
+  group('SpotService and AddSpotScreen publishing integration', () {
+    tearDown(() {
+      SpotService.mockObtenerSpots = null;
+      SpotService.mockPublicarSpot = null;
+    });
+
+    test('obtenerSpotsActivos returns list from mock hook', () async {
+      final mockData = [
+        const SpotItem(
+          id: 'test_1',
+          title: 'Tacos Don Pancho',
+          price: 50.0,
+          type: SpotType.localBusiness,
+          category: 'Antojitos',
+          distance: 'a 30 m',
+          exactAddress: 'Av. Carranza 400',
+          isOpen: true,
+        ),
+      ];
+
+      SpotService.mockObtenerSpots = () async => mockData;
+
+      final result = await SpotService.obtenerSpotsActivos();
+      expect(result.length, 1);
+      expect(result.first.title, 'Tacos Don Pancho');
+      expect(result.first.price, 50.0);
+      expect(result.first.type, SpotType.localBusiness);
+    });
+
+    test('publicarSpot returns created SpotItem with mock hook', () async {
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) async {
+        return SpotItem(
+          id: 'mock_created_99',
+          title: titulo,
+          price: precio,
+          type: tipo == 'reventa' ? SpotType.reseller : SpotType.localBusiness,
+          category: categoriaNombre ?? 'Antojitos',
+          distance: 'a 50 m',
+          exactAddress: direccionExacta,
+          hasDelivery: tieneEnvio ?? false,
+          deliveryCost: costoEnvio,
+          meetingPoints: zonaReferencia != null ? [zonaReferencia] : null,
+          imageUrl: fotosUrls?.first,
+          isOpen: true,
+        );
+      };
+
+      final spot = await SpotService.publicarSpot(
+        titulo: 'Elotes Los Compadres',
+        precio: 35.0,
+        latitud: 22.1600,
+        longitud: -100.9650,
+        tipo: 'comida',
+        categoriaNombre: 'Antojitos',
+        descripcion: 'Esquites y elotes asados',
+        direccionExacta: 'Calle Juárez 210',
+        tieneEnvio: true,
+        costoEnvio: '\$15 en la colonia',
+        fotosUrls: ['https://example.com/elote.jpg'],
+      );
+
+      expect(spot.id, 'mock_created_99');
+      expect(spot.title, 'Elotes Los Compadres');
+      expect(spot.price, 35.0);
+      expect(spot.type, SpotType.localBusiness);
+      expect(spot.hasDelivery, isTrue);
+      expect(spot.deliveryCost, '\$15 en la colonia');
+      expect(spot.imageUrl, 'https://example.com/elote.jpg');
+    });
+
+    testWidgets('AddSpotScreen displays error SnackBar on publication failure', (WidgetTester tester) async {
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) async {
+        throw Exception('Fallo de conexión simulado');
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Rellenar campos válidos para reventa
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco de la Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Reloj retro Casio',
+      );
+
+      // Presionar publicar
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pumpAndSettle();
+
+      // Debe mostrar el SnackBar de error
+      expect(find.textContaining('Error al publicar: Exception: Fallo de conexión simulado'), findsOneWidget);
+      // La pantalla no se cerró y el botón sigue disponible
+      expect(find.text('Publicar en el mapa'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen handles PostgrestException gracefully with SnackBar', (WidgetTester tester) async {
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) async {
+        throw const PostgrestException(message: 'duplicate key value violates unique constraint');
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco de la Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Reloj retro Casio',
+      );
+
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Error al publicar: duplicate key value violates unique constraint'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen displays CircularProgressIndicator while publishing', (WidgetTester tester) async {
+      final completer = Completer<SpotItem>();
+
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) {
+        return completer.future;
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Rellenar campos válidos
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Colección de tazas',
+      );
+
+      // Presionar publicar
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pump();
+
+      // El botón ahora debe mostrar el CircularProgressIndicator
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      // Completar la publicación
+      completer.complete(
+        const SpotItem(
+          id: 'test_done',
+          title: 'Colección de tazas',
+          price: 40.0,
+          type: SpotType.reseller,
+          category: 'Segunda mano',
+          distance: 'a 50 m',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Confirma que se muestra el SnackBar de éxito
+      expect(find.text('¡Punto publicado exitosamente en el mapa!'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen validates that at least 1 photo is required before publishing', (WidgetTester tester) async {
+      // Forzar que no haya fotos seleccionadas
+      AddSpotScreen.mockInitialFiles = [];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Rellenar campos de texto válidos
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Lámpara de noche vintage',
+      );
+
+      // Intentar publicar sin fotos
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pumpAndSettle();
+
+      // Debe mostrar advertencia de fotos requeridas
+      expect(find.text('Por favor agrega al menos una foto de tu producto o puesto.'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen renders price field and sends entered price to publicarSpot', (WidgetTester tester) async {
+      double? capturedPrice;
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) async {
+        capturedPrice = precio;
+        return SpotItem(
+          id: 'price_test_spot',
+          title: titulo,
+          price: precio,
+          type: SpotType.reseller,
+          category: 'Segunda mano',
+          distance: 'a 50 m',
+          isOpen: true,
+        );
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Verificar que el campo de precio está presente en la UI
+      expect(find.text('Precio (MXN)'), findsOneWidget);
+      expect(find.widgetWithText(TextFormField, 'ej. 45 o 120'), findsOneWidget);
+
+      // Ingresar datos
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Bicicleta de montaña rodada 29',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'ej. 45 o 120'),
+        '1850',
+      );
+
+      // Publicar
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pumpAndSettle();
+
+      expect(capturedPrice, 1850.0);
+    });
+
+    testWidgets('AddSpotScreen picks images, shows Portada badge and removes individual photos', (WidgetTester tester) async {
+      AddSpotScreen.mockInitialFiles = [];
+      AddSpotScreen.mockPickImages = () async => [
+        XFile('test/foto_1.jpg'),
+        XFile('test/foto_2.jpg'),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Al inicio debe mostrar 0/5
+      expect(find.text('0 / 5'), findsOneWidget);
+      expect(find.text('Agregar fotos\n(máx. 5)'), findsOneWidget);
+
+      // Tocar el botón de agregar fotos
+      await tester.ensureVisible(find.text('Agregar fotos\n(máx. 5)'));
+      await tester.tap(find.text('Agregar fotos\n(máx. 5)'));
+      await tester.pumpAndSettle();
+
+      // Ahora debe mostrar 2/5 y el badge "Portada" en la primera foto
+      expect(find.text('2 / 5'), findsOneWidget);
+      expect(find.text('Portada'), findsOneWidget);
+
+      // Remover una foto con el botón 'x'
+      final closeButtons = find.byIcon(Icons.close_rounded);
+      expect(closeButtons, findsNWidgets(2));
+      await tester.tap(closeButtons.first);
+      await tester.pumpAndSettle();
+
+      // Debe quedar 1 foto (1/5) y seguir mostrando Portada
+      expect(find.text('1 / 5'), findsOneWidget);
+      expect(find.text('Portada'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen interactive map updates coordinates and handles recenter', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(
+                  ctx,
+                  MaterialPageRoute(
+                    builder: (_) => const AddSpotScreen(
+                      initialLocation: LatLng(22.1565, -100.9855),
+                    ),
+                  ),
+                ),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      // Verificar que el mapa interactivo y coordenadas iniciales se renderizan
+      expect(find.byType(FlutterMap), findsOneWidget);
+      expect(find.textContaining('Coordenadas: Lat 22.1565, Lng -100.9855'), findsOneWidget);
+
+      // Verificar botón de recentrar
+      expect(find.byIcon(Icons.my_location_rounded), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.my_location_rounded));
+      await tester.pump(const Duration(milliseconds: 300));
+    });
+
+    testWidgets('ProfileScreen renders identity, stats, listings, settings and nav bar', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ProfileScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 1. Header
+      expect(find.text('spotMarket'), findsOneWidget);
+      expect(find.text('My Profile'), findsOneWidget);
+      expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
+
+      // 2. Identity
+      expect(find.text('Gerardo Hipólito'), findsOneWidget);
+      expect(find.text('gerardo.h@spotmarket.com'), findsOneWidget);
+      expect(find.text('Vecino'), findsOneWidget);
+      expect(find.byIcon(Icons.camera_alt), findsOneWidget);
+
+      // 3. Stats card
+      expect(find.text('5.0'), findsOneWidget);
+      expect(find.text('Rating'), findsOneWidget);
+      expect(find.text('6'), findsOneWidget);
+      expect(find.text('Active Spots'), findsOneWidget);
+      expect(find.text('2026'), findsOneWidget);
+      expect(find.text('Member since'), findsOneWidget);
+
+      // 4. My Listings
+      expect(find.text('My Listings'), findsOneWidget);
+      expect(find.text('See All'), findsOneWidget);
+      expect(find.text('Taco Food Stand'), findsOneWidget);
+      expect(find.text('\$6'), findsOneWidget);
+      expect(find.text('Vintage Jacket'), findsOneWidget);
+      expect(find.text('\$45'), findsOneWidget);
+      expect(find.text('Camera Rental'), findsOneWidget);
+      expect(find.text('\$25/d'), findsOneWidget);
+
+      // 5. Settings ListTiles
+      expect(find.text('Edit Profile'), findsOneWidget);
+      expect(find.text('Upgrade to Business (Local)'), findsOneWidget);
+      expect(find.text('Community Rules'), findsOneWidget);
+      expect(find.byIcon(Icons.person_outline), findsOneWidget);
+      expect(find.byIcon(Icons.storefront_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.verified_user_outlined), findsOneWidget);
+
+      // 6. Bottom Navigation Bar
+      expect(find.byIcon(Icons.map_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.search_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.notifications_none_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.person_rounded), findsOneWidget);
+    });
+
+    testWidgets('ProfileScreen renders dynamic user data and role badge from UserService', (WidgetTester tester) async {
+      UserService.mockObtenerPerfil = () async {
+        return UserProfileData(
+          id: 'mock_user_99',
+          nombre: 'Mariana Ruiz',
+          correo: 'mariana.r@spotmarket.com',
+          fotoPerfil: null, // Probar iniciales
+          rolNombre: 'Local',
+          reputacion: 4.8,
+          fechaRegistro: DateTime(2024, 6, 15),
+        );
+      };
+
+      UserService.mockObtenerSpots = () async {
+        return [
+          {
+            'clave_spot': 'spot_101',
+            'titulo': 'Panadería Artesanal Don Pancho',
+            'precio': 35.0,
+            'activo': true,
+            'fecha_publicacion': '2026-03-01T10:00:00Z',
+            'foto_spot': [
+              {
+                'url_foto': 'https://example.com/pan.jpg',
+                'es_portada': true,
+              }
+            ],
+          },
+          {
+            'clave_spot': 'spot_102',
+            'titulo': 'Café de Olla Orgánico',
+            'precio': 25.0,
+            'activo': true,
+            'fecha_publicacion': '2026-03-02T10:00:00Z',
+            'foto_spot': [],
+          },
+        ];
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ProfileScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verificar nombre, correo, rol y avatar de iniciales
+      expect(find.text('Mariana Ruiz'), findsOneWidget);
+      expect(find.text('mariana.r@spotmarket.com'), findsOneWidget);
+      expect(find.text('Local'), findsOneWidget);
+      expect(find.text('MR'), findsOneWidget);
+
+      // Verificar métricas calculadas dinámicamente
+      expect(find.text('4.8'), findsOneWidget);
+      expect(find.text('2'), findsOneWidget); // 2 spots activos
+      expect(find.text('2024'), findsOneWidget); // Año de registro
+
+      // Verificar spots renderizados en el carrusel
+      expect(find.text('Panadería Artesanal Don Pancho'), findsOneWidget);
+      expect(find.text('\$35'), findsOneWidget);
+      expect(find.text('Café de Olla Orgánico'), findsOneWidget);
+      expect(find.text('\$25'), findsOneWidget);
+    });
+
+    testWidgets('ProfileScreen displays Empty State when user has no spots and button opens AddSpotScreen', (WidgetTester tester) async {
+      UserService.mockObtenerPerfil = () async {
+        return UserProfileData(
+          id: 'user_sin_spots',
+          nombre: 'Carlos Vecino',
+          correo: 'carlos@spotmarket.com',
+          rolNombre: 'Vecino',
+          reputacion: 5.0,
+          fechaRegistro: DateTime(2026, 1, 1),
+        );
+      };
+
+      UserService.mockObtenerSpots = () async => [];
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ProfileScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verificar que el estado vacío de "My Listings" se despliega correctamente
+      expect(find.text('Aún no tienes publicaciones en el mapa'), findsOneWidget);
+      expect(find.text('Publica tus productos, ropa de bazar o antojitos en tu colonia'), findsOneWidget);
+      expect(find.widgetWithText(ElevatedButton, 'Crear publicación'), findsOneWidget);
+      expect(find.text('0'), findsOneWidget); // 0 spots activos
+    });
+
+    testWidgets('ProfileScreen handles logout and redirects to LoginScreen', (WidgetTester tester) async {
+      bool signOutCalled = false;
+      UserService.mockSignOut = () async {
+        signOutCalled = true;
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ProfileScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Buscar el ListTile de cerrar sesión en la lista de configuración
+      await tester.ensureVisible(find.text('Cerrar sesión'));
+      await tester.tap(find.text('Cerrar sesión'));
+      await tester.pumpAndSettle();
+
+      // Verificar que se abre el diálogo de confirmación
+      expect(find.text('¿Cerrar sesión?'), findsOneWidget);
+
+      // Confirmar cierre de sesión
+      final confirmBtn = find.widgetWithText(TextButton, 'Cerrar sesión');
+      await tester.tap(confirmBtn);
+      await tester.pumpAndSettle();
+
+      // Verificar que se invocó mockSignOut y redirigió a LoginScreen
+      expect(signOutCalled, isTrue);
+      expect(find.text('Iniciar Sesión'), findsOneWidget);
+      expect(find.text('El tianguis y bazar de tu colonia en el mapa'), findsOneWidget);
+    });
+
+    testWidgets('RegisterScreen renders all fields, clean layout without social auth, and validates inputs', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: RegisterScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verificar encabezado y títulos
+      expect(find.text('Crear cuenta'), findsOneWidget);
+      expect(find.text('Únete a la comunidad de comercio local en tu colonia'), findsOneWidget);
+      expect(find.byIcon(Icons.arrow_back_ios_new_rounded), findsOneWidget);
+
+      // Verificar que NO haya botones ni menciones de redes sociales (Google, Facebook, Apple)
+      expect(find.text('Google'), findsNothing);
+      expect(find.text('Facebook'), findsNothing);
+      expect(find.text('Apple'), findsNothing);
+
+      // Verificar etiquetas de campos
+      expect(find.text('Nombre completo'), findsOneWidget);
+      expect(find.text('Correo electrónico'), findsOneWidget);
+      expect(find.text('Contraseña'), findsOneWidget);
+      expect(find.text('Confirmar contraseña'), findsOneWidget);
+      expect(find.text('Crear Cuenta'), findsOneWidget);
+      expect(find.text('Inicia sesión'), findsOneWidget);
+
+      // Pulsar "Crear Cuenta" con campos vacíos para comprobar validaciones
+      await tester.ensureVisible(find.text('Crear Cuenta'));
+      await tester.tap(find.text('Crear Cuenta'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Por favor ingresa tu nombre completo'), findsOneWidget);
+      expect(find.text('Por favor ingresa tu correo electrónico'), findsOneWidget);
+      expect(find.text('Por favor ingresa una contraseña'), findsOneWidget);
+      expect(find.text('Por favor confirma tu contraseña'), findsOneWidget);
+
+      // Validar formato de email inválido
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. Gerardo Hipólito'), 'Juan Pérez');
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. vecino@spotmarket.com'), 'correo_invalido');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Mínimo 6 caracteres'), '12345');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Vuelve a escribir tu contraseña'), '123456');
+
+      await tester.ensureVisible(find.text('Crear Cuenta'));
+      await tester.tap(find.text('Crear Cuenta'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Ingresa un correo electrónico válido'), findsOneWidget);
+      expect(find.text('La contraseña debe tener al menos 6 caracteres'), findsOneWidget);
+      expect(find.text('Las contraseñas no coinciden'), findsOneWidget);
+    });
+
+    testWidgets('RegisterScreen handles successful signUp and AuthException error with SnackBar', (WidgetTester tester) async {
+      String? capturedEmail;
+      String? capturedPassword;
+      String? capturedName;
+
+      RegisterScreen.mockSignUp = ({
+        required String email,
+        required String password,
+        Map<String, dynamic>? data,
+      }) async {
+        capturedEmail = email;
+        capturedPassword = password;
+        capturedName = data?['full_name'] as String?;
+        return AuthResponse(
+          session: null,
+          user: User(
+            id: 'mock_uid_123',
+            appMetadata: {},
+            userMetadata: data ?? {},
+            aud: 'authenticated',
+            createdAt: DateTime.now().toIso8601String(),
+          ),
+        );
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: RegisterScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Completar campos correctamente
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. Gerardo Hipólito'), 'María del Carmen');
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. vecino@spotmarket.com'), 'maria@spotmarket.com');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Mínimo 6 caracteres'), 'secreto123');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Vuelve a escribir tu contraseña'), 'secreto123');
+
+      // Enviar formulario
+      await tester.ensureVisible(find.text('Crear Cuenta'));
+      await tester.tap(find.text('Crear Cuenta'));
+      await tester.pump();
+
+      // Verificar que se invocó con los datos adecuados
+      expect(capturedEmail, 'maria@spotmarket.com');
+      expect(capturedPassword, 'secreto123');
+      expect(capturedName, 'María del Carmen');
+
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pump(const Duration(milliseconds: 600));
+
+      // Verificar SnackBar verde de bienvenida
+      expect(find.text('Cuenta creada con éxito. ¡Bienvenido a spotMarket!'), findsOneWidget);
+
+      // Limpiar tickers del mapa
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Caso de prueba para AuthException
+      RegisterScreen.mockSignUp = ({
+        required String email,
+        required String password,
+        Map<String, dynamic>? data,
+      }) async {
+        throw const AuthException('El correo ya se encuentra registrado.');
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: RegisterScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. Gerardo Hipólito'), 'Pedro');
+      await tester.enterText(find.widgetWithText(TextFormField, 'ej. vecino@spotmarket.com'), 'pedro@spotmarket.com');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Mínimo 6 caracteres'), 'password');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Vuelve a escribir tu contraseña'), 'password');
+
+      await tester.ensureVisible(find.text('Crear Cuenta'));
+      await tester.tap(find.text('Crear Cuenta'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('El correo ya se encuentra registrado.'), findsOneWidget);
+
+      // Limpiar hook
+      RegisterScreen.mockSignUp = null;
+    });
+
+    testWidgets('RegisterScreen bottom link navigates back to Login with Navigator.pop', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const RegisterScreen())),
+                child: const Text('Ir a Registro'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Ir a Registro'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Crear cuenta'), findsOneWidget);
+
+      // Tocar enlace "¿Ya tienes una cuenta? Inicia sesión"
+      await tester.ensureVisible(find.text('Inicia sesión'));
+      await tester.tap(find.text('Inicia sesión'));
+      await tester.pumpAndSettle();
+
+      // Debe haber regresado a la pantalla anterior
+      expect(find.text('Ir a Registro'), findsOneWidget);
+      expect(find.text('Crear cuenta'), findsNothing);
+    });
   });
 }
 

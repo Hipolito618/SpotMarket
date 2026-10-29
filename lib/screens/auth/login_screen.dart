@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../core/controllers/theme_controller.dart';
 import '../../core/theme/app_colors.dart';
 import '../home/map_home_screen.dart';
+import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -78,13 +79,8 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _onRegister() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('¡Registro de nuevos vecinos y puestos disponible próximamente!'),
-        backgroundColor: Theme.of(context).colorScheme.secondary,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const RegisterScreen()),
     );
   }
 
