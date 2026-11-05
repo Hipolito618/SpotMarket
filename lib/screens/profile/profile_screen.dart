@@ -801,7 +801,75 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  /// Sección de listings: Carrusel horizontal de spots o estado vacío (Empty State)
+  /// Identificador del spot sin importar el formato de columna devuelto por Supabase
+  dynamic _spotId(Map<String, dynamic> spot) =>
+      spot['clave_spot'] ?? spot['Clave_spot'] ?? spot['id'];
+
+  void _mostrarMensaje(String texto) {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(texto),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  /// Solicita confirmación y elimina la publicación. Devuelve `true` si se eliminó.
+  Future<bool> _confirmarEliminacion(Map<String, dynamic> spot) async {
+    final titulo = (spot['Titulo'] ?? spot['titulo'] ?? 'esta publicación').toString();
+
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          '¿Eliminar publicación?',
+          style: GoogleFonts.rubik(fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          'Se eliminará "$titulo" del mapa. Esta acción no se puede deshacer.',
+          style: GoogleFonts.plusJakartaSans(),
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Eliminar',
+              style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmar != true || !mounted) return false;
+
+    final id = _spotId(spot).toString();
+    final restantes =
+    _userSpots.where((s) => _spotId(s).toString() != id).toList();
+    final error = await UserService.eliminarSpot(_spotId(spot), restantes);
+    if (error != null) {
+      if (mounted) _mostrarMensaje(error);
+      return false;
+    }
+    return true;
+  }
+
+  /// Quita el elemento de la lista una vez descartado con el gesto de deslizar.
+  void _quitarDeLista(Map<String, dynamic> spot) {
+    final id = _spotId(spot).toString();
+    setState(() {
+      _userSpots = _userSpots.where((s) => _spotId(s).toString() != id).toList();
+    });
+    _mostrarMensaje('Publicación eliminada.');
+  }
+
+  /// Sección de listings: lista de publicaciones (deslizar para eliminar) o estado vacío
   Widget _buildListingsSection({
     required Color cardBg,
     required Color borderColor,
@@ -881,48 +949,89 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
 
-    return SizedBox(
-      height: 172,
-      child: ListView.separated(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        itemCount: _userSpots.length,
-        separatorBuilder: (context, index) => const SizedBox(width: 14),
-        itemBuilder: (context, index) {
-          final spot = _userSpots[index];
-          final coverPhoto = _getSpotCoverPhoto(spot['foto_spot'] ?? spot['Foto_spot']);
-          final priceFormatted = _formatPrice(spot['Precio'] ?? spot['precio']);
-          final title = (spot['Titulo'] ?? spot['titulo'] ?? 'Publicación').toString();
-
-          return _buildListingCard(
-            title: title,
-            price: priceFormatted,
-            imageUrl: coverPhoto,
-            cardBg: cardBg,
-            borderColor: borderColor,
-            textPrimary: textPrimary,
-            isDark: isDark,
-            primaryColor: primaryColor,
-          );
-        },
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Desliza hacia la izquierda para eliminar una publicación',
+            style: GoogleFonts.plusJakartaSans(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: textSecondary,
+            ),
+          ),
+          const SizedBox(height: 10),
+          for (final spot in _userSpots)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Dismissible(
+                key: ValueKey('spot_${_spotId(spot)}'),
+                direction: DismissDirection.endToStart,
+                background: Container(
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.symmetric(horizontal: 22),
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Eliminar',
+                        style: GoogleFonts.plusJakartaSans(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Icon(Icons.delete_outline_rounded, color: Colors.white),
+                    ],
+                  ),
+                ),
+                confirmDismiss: (_) => _confirmarEliminacion(spot),
+                onDismissed: (_) => _quitarDeLista(spot),
+                child: _buildListingTile(
+                  title: (spot['Titulo'] ?? spot['titulo'] ?? 'Publicación').toString(),
+                  price: _formatPrice(spot['Precio'] ?? spot['precio']),
+                  imageUrl: _getSpotCoverPhoto(spot['foto_spot'] ?? spot['Foto_spot']),
+                  activo: (spot['activo'] ?? spot['Activo']) == true,
+                  cardBg: cardBg,
+                  borderColor: borderColor,
+                  textPrimary: textPrimary,
+                  textSecondary: textSecondary,
+                  isDark: isDark,
+                  primaryColor: primaryColor,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
 
-  /// Tarjeta individual del carrusel de listings
-  Widget _buildListingCard({
+  /// Elemento de la lista de publicaciones del usuario
+  Widget _buildListingTile({
     required String title,
     required String price,
     required String? imageUrl,
+    required bool activo,
     required Color cardBg,
     required Color borderColor,
     required Color textPrimary,
+    required Color textSecondary,
     required bool isDark,
     required Color primaryColor,
   }) {
+    final placeholder = Container(
+      color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFEDE9E3),
+      child: Icon(Icons.image_outlined, color: textPrimary.withAlpha(120)),
+    );
+
     return Container(
-      width: 148,
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: cardBg,
         borderRadius: BorderRadius.circular(16),
@@ -935,81 +1044,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          // Imagen con etiqueta de precio superpuesta
-          Stack(
-            children: [
-              ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-                child: SizedBox(
-                  height: 108,
-                  width: double.infinity,
-                  child: (imageUrl != null && imageUrl.isNotEmpty)
-                      ? Image.network(
-                          imageUrl,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) => Container(
-                            color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFEDE9E3),
-                            child: Icon(Icons.image_outlined, color: textPrimary.withAlpha(120)),
-                          ),
-                        )
-                      : Container(
-                          color: isDark ? const Color(0xFF2D2A26) : const Color(0xFFEDE9E3),
-                          child: Center(
-                            child: Icon(
-                              Icons.image_outlined,
-                              size: 32,
-                              color: textPrimary.withAlpha(120),
-                            ),
-                          ),
-                        ),
-                ),
-              ),
-              Positioned(
-                bottom: 6,
-                right: 6,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: primaryColor,
-                    borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withAlpha(30),
-                        blurRadius: 4,
-                        offset: const Offset(0, 1),
-                      ),
-                    ],
-                  ),
-                  child: Text(
-                    price,
-                    style: GoogleFonts.plusJakartaSans(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          // Nombre del producto o puesto
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.rubik(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: textPrimary,
-              ),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 72,
+              height: 72,
+              child: (imageUrl != null && imageUrl.isNotEmpty)
+                  ? Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => placeholder,
+              )
+                  : placeholder,
             ),
           ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.rubik(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  price,
+                  style: GoogleFonts.plusJakartaSans(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    color: primaryColor,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  activo ? 'Activo' : 'Inactivo',
+                  style: GoogleFonts.plusJakartaSans(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: activo ? const Color(0xFF1B7F4B) : textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Icon(Icons.chevron_left_rounded, color: textSecondary, size: 22),
         ],
       ),
     );

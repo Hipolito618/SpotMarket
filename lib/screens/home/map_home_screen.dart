@@ -8,12 +8,16 @@ import 'package:latlong2/latlong.dart' hide Path;
 import '../../core/controllers/theme_controller.dart';
 import '../../core/theme/app_colors.dart';
 import '../../models/spot_item.dart';
-import '../../services/spot_service.dart';
+import '../../services/connectivity_service.dart';
+import '../../services/favorites_service.dart';
+import '../../services/pending_queue.dart';
+import '../../services/spot_repository.dart';
+import '../../widgets/spot_options_sheet.dart';
 import '../../widgets/spot_preview_modal.dart';
 import '../profile/profile_screen.dart';
 import '../spots/add_spot_screen.dart';
 
-enum MarketCategory { todos, antojitos, bazar, abiertoAhora }
+enum MarketCategory { todos, antojitos, bazar, abiertoAhora, favoritos }
 
 class MapHomeScreen extends StatefulWidget {
   const MapHomeScreen({super.key});
@@ -40,6 +44,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
   // Estado de carga para los spots dinámicos desde Supabase
   bool _isLoadingSpots = true;
+
+  // Indica que la última consulta falló y no había datos guardados para mostrar
+  bool _errorCarga = false;
 
   // --- PINES DE PRUEBA EN SAN LUIS POTOSÍ (RESPALDO Y REFERENCIA) ---
   static final List<SpotItem> _pinesEjemplo = [
@@ -186,23 +193,48 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   @override
   void initState() {
     super.initState();
-    _cargarSpotsDesdeSupabase();
+    FavoritesService.instance.cargar().then((_) {
+      if (mounted) setState(() {});
+    });
+    ConnectivityService.instance.isOnline.addListener(_alCambiarConexion);
+    _cargarSpotsDesdeSupabase().then((_) => _sincronizarPendientes());
     _initLocation();
   }
 
-  /// Carga dinámica de spots activos desde la base de datos de Supabase
+  /// Envía las publicaciones guardadas sin conexión y vuelve a consultar el mapa.
+  Future<void> _sincronizarPendientes() async {
+    if (PendingQueue.instance.cantidad == 0) return;
+    await PendingQueue.instance.sincronizar();
+    if (mounted) await _cargarSpotsDesdeSupabase();
+  }
+
+  /// Al recuperar la red se sincroniza la cola y se actualiza el catálogo.
+  Future<void> _alCambiarConexion() async {
+    if (!ConnectivityService.instance.isOnline.value) return;
+    await PendingQueue.instance.sincronizar();
+    if (mounted) await _cargarSpotsDesdeSupabase();
+  }
+
+  /// Carga los spots activos (Supabase o, si falla, la copia guardada en el dispositivo)
+  /// y les agrega las publicaciones que aún están pendientes de enviar.
   Future<void> _cargarSpotsDesdeSupabase() async {
     if (!mounted) return;
     setState(() {
       _isLoadingSpots = true;
+      _errorCarga = false;
     });
 
     try {
-      final spotsDb = await SpotService.obtenerSpotsActivos();
+      final spotsDb = await SpotRepository.obtenerSpotsActivos();
       if (!mounted) return;
+      final pendientes = PendingQueue.instance.spotsPendientes;
+      final idsPendientes = pendientes.map((s) => s.id).toSet();
       setState(() {
-        if (spotsDb.isNotEmpty) {
-          _spots = spotsDb;
+        if (spotsDb.isNotEmpty || pendientes.isNotEmpty) {
+          _spots = [
+            ...pendientes,
+            ...spotsDb.where((s) => !idsPendientes.contains(s.id)),
+          ];
         } else if (_spots.isEmpty) {
           _spots = List.of(_pinesEjemplo);
         }
@@ -211,17 +243,25 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     } catch (e) {
       debugPrint('Nota al cargar spots desde Supabase: $e');
       if (!mounted) return;
+      final pendientes = PendingQueue.instance.spotsPendientes;
+      final idsPendientes = pendientes.map((s) => s.id).toSet();
       setState(() {
         if (_spots.isEmpty) {
           _spots = List.of(_pinesEjemplo);
         }
+        _spots = [
+          ...pendientes,
+          ..._spots.where((s) => !idsPendientes.contains(s.id)),
+        ];
         _isLoadingSpots = false;
+        _errorCarga = true;
       });
     }
   }
 
   @override
   void dispose() {
+    ConnectivityService.instance.isOnline.removeListener(_alCambiarConexion);
     _positionStreamSub?.cancel();
     _sheetController.dispose();
     _mapController.dispose();
@@ -429,7 +469,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
         distanceFilter: 10,
       ),
     ).listen(
-      (Position position) {
+          (Position position) {
         if (!mounted) return;
         setState(() {
           _userLocation = LatLng(position.latitude, position.longitude);
@@ -468,6 +508,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
       case MarketCategory.abiertoAhora:
         list = _spots.where((s) => s.isOpen).toList();
         break;
+      case MarketCategory.favoritos:
+        list = _spots.where((s) => FavoritesService.instance.esFavorito(s.id)).toList();
+        break;
     }
 
     // Ordenar automáticamente por distancia exacta a la ubicación del usuario (más cercanos primero)
@@ -489,6 +532,57 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     }
     final spotWithExactDist = spot.copyWith(distance: _formatExactDistance(spot));
     SpotPreviewModal.show(context, spotWithExactDist);
+  }
+
+  /// Agrega o quita un puesto de favoritos y confirma la acción al usuario
+  Future<void> _alternarFavorito(SpotItem spot) async {
+    final agregado = await FavoritesService.instance.alternar(spot.id);
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(agregado ? 'Agregado a favoritos' : 'Quitado de favoritos'),
+        duration: const Duration(milliseconds: 1500),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  /// Menú de opciones del puesto (mantener presionado)
+  void _mostrarOpciones(SpotItem spot) {
+    SpotOptionsSheet.show(
+      context,
+      spot: spot,
+      esFavorito: FavoritesService.instance.esFavorito(spot.id),
+      onVerDetalle: () => _onSpotSelected(spot),
+      onAlternarFavorito: () => _alternarFavorito(spot),
+      onVerEnMapa: () => _centrarEnSpot(spot),
+    );
+  }
+
+  /// Centra el mapa en el puesto y repliega la hoja inferior para dejarlo visible
+  void _centrarEnSpot(SpotItem spot) {
+    if (spot.position == null) return;
+    setState(() => _selectedSpot = spot);
+    _mapController.move(spot.position!, 16.5);
+    if (_sheetController.isAttached) {
+      _sheetController.animateTo(
+        0.18,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  /// Abre el perfil y, al volver, actualiza los spots por si hubo cambios
+  Future<void> _abrirPerfil() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const ProfileScreen()),
+    );
+    if (mounted) _cargarSpotsDesdeSupabase();
   }
 
   /// Recentra la cámara instantáneamente hacia la última coordenada conocida del usuario
@@ -575,16 +669,16 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 maxZoom: 19,
                 tileBuilder: isDark
                     ? (context, tileWidget, tile) {
-                        return ColorFiltered(
-                          colorFilter: const ColorFilter.matrix(<double>[
-                            -0.80, 0, 0, 0, 240, // Red cálido invertido
-                            0, -0.80, 0, 0, 235, // Green suave
-                            0, 0, -0.80, 0, 225, // Blue reducido para tono carbón cálido
-                            0, 0, 0, 1, 0,       // Alpha intacto
-                          ]),
-                          child: tileWidget,
-                        );
-                      }
+                  return ColorFiltered(
+                    colorFilter: const ColorFilter.matrix(<double>[
+                      -0.80, 0, 0, 0, 240, // Red cálido invertido
+                      0, -0.80, 0, 0, 235, // Green suave
+                      0, 0, -0.80, 0, 225, // Blue reducido para tono carbón cálido
+                      0, 0, 0, 1, 0,       // Alpha intacto
+                    ]),
+                    child: tileWidget,
+                  );
+                }
                     : null,
               ),
               MarkerLayer(
@@ -687,12 +781,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                         ),
                         const SizedBox(width: 8),
                         GestureDetector(
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(builder: (_) => const ProfileScreen()),
-                            );
-                          },
+                          onTap: _abrirPerfil,
                           child: Container(
                             width: 30,
                             height: 30,
@@ -760,6 +849,16 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                           textPrimary: textPrimary,
                           isDark: isDark,
                         ),
+                        const SizedBox(width: 8),
+                        _buildCategoryFilterChip(
+                          label: '❤️ Favoritos',
+                          category: MarketCategory.favoritos,
+                          isSelected: _selectedCategory == MarketCategory.favoritos,
+                          primaryColor: primaryColor,
+                          surfaceColor: surfaceColor,
+                          textPrimary: textPrimary,
+                          isDark: isDark,
+                        ),
                       ],
                     ),
                   ).animate().fadeIn(delay: 150.ms, duration: 400.ms).slideY(begin: -0.1, end: 0),
@@ -768,52 +867,18 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
             ),
           ),
 
-          // Indicador sutil de carga de spots desde Supabase
-          if (_isLoadingSpots)
+          // Estado de la carga de spots: actualizando, datos guardados o error con reintento
+          if (_isLoadingSpots || _errorCarga || SpotRepository.ultimaCargaDesdeCache)
             Positioned(
               top: MediaQuery.of(context).padding.top + 104,
               left: 0,
               right: 0,
               child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: surfaceColor.withAlpha(235),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: isDark ? const Color(0xFF38342F) : const Color(0xFFEBE6DC),
-                      width: 1,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withAlpha(25),
-                        blurRadius: 10,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Actualizando spots...',
-                        style: GoogleFonts.plusJakartaSans(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: textPrimary,
-                        ),
-                      ),
-                    ],
-                  ),
+                child: _buildEstadoCarga(
+                  isDark: isDark,
+                  surfaceColor: surfaceColor,
+                  primaryColor: primaryColor,
+                  textPrimary: textPrimary,
                 ),
               ),
             ),
@@ -1084,6 +1149,87 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     );
   }
 
+  /// Indicador del estado de la carga: actualizando, datos guardados o error con reintento
+  Widget _buildEstadoCarga({
+    required bool isDark,
+    required Color surfaceColor,
+    required Color primaryColor,
+    required Color textPrimary,
+  }) {
+    final String mensaje;
+    final Widget icono;
+
+    if (_isLoadingSpots) {
+      mensaje = 'Actualizando spots...';
+      icono = SizedBox(
+        width: 12,
+        height: 12,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+        ),
+      );
+    } else if (_errorCarga) {
+      mensaje = 'No se pudieron cargar los spots.';
+      icono = const Icon(Icons.cloud_off_rounded, size: 14, color: Colors.redAccent);
+    } else {
+      mensaje = 'Mostrando datos guardados';
+      icono = Icon(Icons.history_rounded, size: 14, color: primaryColor);
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: surfaceColor.withAlpha(235),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isDark ? const Color(0xFF38342F) : const Color(0xFFEBE6DC),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(25),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          icono,
+          const SizedBox(width: 8),
+          Text(
+            mensaje,
+            style: GoogleFonts.plusJakartaSans(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: textPrimary,
+            ),
+          ),
+          if (_errorCarga && !_isLoadingSpots) ...[
+            const SizedBox(width: 10),
+            InkWell(
+              onTap: _cargarSpotsDesdeSupabase,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                child: Text(
+                  'Reintentar',
+                  style: GoogleFonts.plusJakartaSans(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: primaryColor,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   /// Chip individual de categoría con estilo cápsula
   Widget _buildCategoryFilterChip({
     required String label,
@@ -1199,6 +1345,8 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
     return InkWell(
       onTap: onTap,
+      onDoubleTap: () => _alternarFavorito(spot),
+      onLongPress: () => _mostrarOpciones(spot),
       borderRadius: BorderRadius.circular(16),
       child: Container(
         width: 250,
@@ -1223,10 +1371,10 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 height: 58,
                 child: spot.imageUrl != null && spot.imageUrl!.isNotEmpty
                     ? Image.network(
-                        spot.imageUrl!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) => _buildItemFallbackIcon(spot, isDark),
-                      )
+                  spot.imageUrl!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => _buildItemFallbackIcon(spot, isDark),
+                )
                     : _buildItemFallbackIcon(spot, isDark),
               ),
             ),
@@ -1281,6 +1429,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 ],
               ),
             ),
+            if (FavoritesService.instance.esFavorito(spot.id))
+              const Padding(
+                padding: EdgeInsets.only(left: 6),
+                child: Icon(Icons.favorite_rounded, size: 18, color: Color(0xFFD81B60)),
+              ),
           ],
         ),
       ),
@@ -1301,6 +1454,8 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
     return InkWell(
       onTap: onTap,
+      onDoubleTap: () => _alternarFavorito(spot),
+      onLongPress: () => _mostrarOpciones(spot),
       borderRadius: BorderRadius.circular(16),
       child: Container(
         padding: const EdgeInsets.all(12),
@@ -1321,10 +1476,10 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 height: 64,
                 child: spot.imageUrl != null && spot.imageUrl!.isNotEmpty
                     ? Image.network(
-                        spot.imageUrl!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) => _buildItemFallbackIcon(spot, isDark),
-                      )
+                  spot.imageUrl!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => _buildItemFallbackIcon(spot, isDark),
+                )
                     : _buildItemFallbackIcon(spot, isDark),
               ),
             ),
@@ -1388,6 +1543,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 ],
               ),
             ),
+            if (FavoritesService.instance.esFavorito(spot.id))
+              const Padding(
+                padding: EdgeInsets.only(left: 8),
+                child: Icon(Icons.favorite_rounded, size: 20, color: Color(0xFFD81B60)),
+              ),
           ],
         ),
       ),
