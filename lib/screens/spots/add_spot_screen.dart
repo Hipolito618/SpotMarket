@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart' hide Path;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_colors.dart';
 import '../../services/spot_service.dart';
+import '../auth/login_screen.dart';
 
 /// Tipos de venta seleccionables en el formulario
 enum SaleType { bazar, food, reseller }
@@ -329,15 +330,32 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       setState(() {
         _isPublishing = false;
       });
+
+      final errorMessage = e.toString();
+      final isSessionError = errorMessage.contains('No hay una sesión iniciada') ||
+          errorMessage.toLowerCase().contains('inicia sesión') ||
+          errorMessage.toLowerCase().contains('session');
+
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error al publicar: ${e.toString()}'),
+          content: Text(
+            isSessionError
+                ? 'No hay una sesión iniciada. Por favor, inicia sesión para publicar un spot.'
+                : 'Error al publicar: $errorMessage',
+          ),
           backgroundColor: Colors.redAccent,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
+
+      if (isSessionError) {
+        Navigator.push(
+          context,
+          MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+        );
+      }
     }
   }
 

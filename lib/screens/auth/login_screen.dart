@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/controllers/theme_controller.dart';
 import '../../core/theme/app_colors.dart';
 import '../home/map_home_screen.dart';
@@ -8,6 +9,13 @@ import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
+
+  /// Hook para pruebas unitarias y de widgets
+  @visibleForTesting
+  static Future<AuthResponse> Function({
+    required String email,
+    required String password,
+  })? mockSignIn;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -32,27 +40,62 @@ class _LoginScreenState extends State<LoginScreen> {
     // Cerrar teclado virtual
     FocusScope.of(context).unfocus();
 
-    // Si los campos están vacíos, permitir autocompletar demo directamente
-    final email = _emailController.text.trim();
-    final password = _passwordController.text.trim();
-
-    if (email.isEmpty && password.isEmpty) {
-      _emailController.text = 'demo';
-      _passwordController.text = 'demo';
+    if (!(_formKey.currentState?.validate() ?? false)) {
+      return;
     }
 
-    if (_formKey.currentState?.validate() ?? false) {
-      setState(() => _isLoading = true);
+    setState(() => _isLoading = true);
 
-      // Simulación de autenticación suave
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+    try {
+      final AuthResponse authResponse;
+      if (LoginScreen.mockSignIn != null) {
+        authResponse = await LoginScreen.mockSignIn!(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      } else {
+        authResponse = await Supabase.instance.client.auth.signInWithPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      }
 
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(builder: (_) => const MapHomeScreen()),
-      );
+      if (authResponse.user != null) {
+        debugPrint('Login exitoso: ${authResponse.user!.id}');
+        if (mounted) {
+          if (Navigator.of(context).canPop()) {
+            Navigator.of(context).pop(true);
+          } else {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute<void>(builder: (_) => const MapHomeScreen()),
+            );
+          }
+        }
+      }
+    } on AuthException catch (e) {
+      debugPrint('Error de autenticación: ${e.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.message}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error inesperado: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error inesperado: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -203,13 +246,12 @@ class _LoginScreenState extends State<LoginScreen> {
                           focusColor: primaryColor,
                         ),
                         validator: (value) {
-                          final val = value?.trim().toLowerCase() ?? '';
+                          final val = value?.trim() ?? '';
                           if (val.isEmpty) {
-                            return 'Ingresa tu correo o "demo"';
+                            return 'Por favor ingresa tu correo electrónico';
                           }
-                          if (val == 'demo') return null; // Acceso rápido demo
                           if (!val.contains('@') || !val.contains('.')) {
-                            return 'Ingresa un correo válido (o escribe "demo")';
+                            return 'Ingresa un correo electrónico válido';
                           }
                           return null;
                         },
@@ -229,7 +271,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           fontWeight: FontWeight.w500,
                         ),
                         decoration: _buildCapsuleInputDecoration(
-                          hintText: '•••••••••• (o escribe "demo")',
+                          hintText: '••••••••••',
                           inputBg: inputBg,
                           borderColor: inputBorderColor,
                           hintColor: textSecondary,
@@ -250,13 +292,12 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ),
                         validator: (value) {
-                          final val = value?.trim().toLowerCase() ?? '';
+                          final val = value?.trim() ?? '';
                           if (val.isEmpty) {
-                            return 'Ingresa tu contraseña o "demo"';
+                            return 'Por favor ingresa tu contraseña';
                           }
-                          if (val == 'demo') return null; // Acceso rápido demo
-                          if (val.length < 4) {
-                            return 'La contraseña debe tener al menos 4 caracteres';
+                          if (val.length < 6) {
+                            return 'La contraseña debe tener al menos 6 caracteres';
                           }
                           return null;
                         },
@@ -271,8 +312,8 @@ class _LoginScreenState extends State<LoginScreen> {
                           InkWell(
                             onTap: () {
                               setState(() {
-                                _emailController.text = 'demo';
-                                _passwordController.text = 'demo';
+                                _emailController.text = 'vecino@spotmarket.com';
+                                _passwordController.text = 'spotmarket123';
                               });
                             },
                             borderRadius: BorderRadius.circular(6),

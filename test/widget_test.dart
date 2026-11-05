@@ -10,6 +10,7 @@ import 'package:latlong2/latlong.dart' hide Path;
 import 'package:spot_market/main.dart';
 import 'package:spot_market/core/controllers/theme_controller.dart';
 import 'package:spot_market/models/spot_item.dart';
+import 'package:spot_market/screens/auth/login_screen.dart';
 import 'package:spot_market/screens/auth/register_screen.dart';
 import 'package:spot_market/screens/home/map_home_screen.dart';
 import 'package:spot_market/screens/profile/profile_screen.dart';
@@ -35,6 +36,8 @@ void main() {
   tearDown(() {
     AddSpotScreen.mockInitialFiles = null;
     AddSpotScreen.mockPickImages = null;
+    LoginScreen.mockSignIn = null;
+    RegisterScreen.mockSignUp = null;
     UserService.mockObtenerPerfil = null;
     UserService.mockObtenerSpots = null;
     UserService.mockSignOut = null;
@@ -474,6 +477,57 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Error al publicar: duplicate key value violates unique constraint'), findsOneWidget);
+    });
+
+    testWidgets('AddSpotScreen handles session error with SnackBar and navigates to LoginScreen', (WidgetTester tester) async {
+      SpotService.mockPublicarSpot = ({
+        required String titulo,
+        required double precio,
+        required double latitud,
+        required double longitud,
+        required String tipo,
+        String? categoriaNombre,
+        String? descripcion,
+        String? direccionExacta,
+        bool? tieneEnvio,
+        String? costoEnvio,
+        String? horario,
+        double? radioAprox,
+        String? zonaReferencia,
+        List<String>? fotosUrls,
+      }) async {
+        throw Exception('No hay una sesión iniciada. Inicia sesión para publicar un spot.');
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => ElevatedButton(
+                onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => const AddSpotScreen())),
+                child: const Text('Abrir'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Abrir'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Ingresa puntos medios (ej. OXXO Glorieta, Kiosco)'),
+        'Kiosco de la Plaza',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, '¿Qué vendes o ofreces?'),
+        'Reloj retro Casio',
+      );
+
+      await tester.tap(find.text('Publicar en el mapa'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No hay una sesión iniciada. Por favor, inicia sesión para publicar un spot.'), findsOneWidget);
+      expect(find.byType(LoginScreen), findsOneWidget);
     });
 
     testWidgets('AddSpotScreen displays CircularProgressIndicator while publishing', (WidgetTester tester) async {
@@ -1076,6 +1130,120 @@ void main() {
       // Debe haber regresado a la pantalla anterior
       expect(find.text('Ir a Registro'), findsOneWidget);
       expect(find.text('Crear cuenta'), findsNothing);
+    });
+
+    testWidgets('LoginScreen renders fields, validates inputs, and handles successful login', (WidgetTester tester) async {
+      String? signedInEmail;
+      String? signedInPassword;
+
+      LoginScreen.mockSignIn = ({
+        required String email,
+        required String password,
+      }) async {
+        signedInEmail = email;
+        signedInPassword = password;
+        return AuthResponse(
+          session: null,
+          user: User(
+            id: 'user_login_test_123',
+            appMetadata: {},
+            userMetadata: {},
+            aud: 'authenticated',
+            createdAt: DateTime.now().toIso8601String(),
+          ),
+        );
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: LoginScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verificar elementos principales
+      expect(find.text('Correo electrónico'), findsOneWidget);
+      expect(find.text('Contraseña'), findsOneWidget);
+      expect(find.text('Iniciar Sesión'), findsOneWidget);
+
+      // Intentar enviar con campos vacíos
+      await tester.tap(find.text('Iniciar Sesión'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Por favor ingresa tu correo electrónico'), findsOneWidget);
+      expect(find.text('Por favor ingresa tu contraseña'), findsOneWidget);
+
+      // Ingresar credenciales válidas
+      await tester.enterText(find.widgetWithText(TextFormField, 'vecino@correo.com'), 'vecino@spotmarket.com');
+      await tester.enterText(find.widgetWithText(TextFormField, '••••••••••'), 'password123');
+
+      await tester.tap(find.text('Iniciar Sesión'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(signedInEmail, 'vecino@spotmarket.com');
+      expect(signedInPassword, 'password123');
+      expect(find.byType(MapHomeScreen), findsOneWidget);
+
+      LoginScreen.mockSignIn = null;
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(milliseconds: 200));
+    });
+
+    testWidgets('LoginScreen handles AuthException with red SnackBar and stays on screen', (WidgetTester tester) async {
+      LoginScreen.mockSignIn = ({
+        required String email,
+        required String password,
+      }) async {
+        throw const AuthException('Credenciales inválidas');
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: LoginScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'vecino@correo.com'), 'error@spotmarket.com');
+      await tester.enterText(find.widgetWithText(TextFormField, '••••••••••'), 'password123');
+
+      await tester.tap(find.text('Iniciar Sesión'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Error: Credenciales inválidas'), findsOneWidget);
+      expect(find.byType(LoginScreen), findsOneWidget);
+
+      LoginScreen.mockSignIn = null;
+    });
+
+    testWidgets('LoginScreen does not navigate if signInWithPassword returns null user', (WidgetTester tester) async {
+      LoginScreen.mockSignIn = ({
+        required String email,
+        required String password,
+      }) async {
+        return AuthResponse(session: null, user: null);
+      };
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: LoginScreen(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'vecino@correo.com'), 'nouser@spotmarket.com');
+      await tester.enterText(find.widgetWithText(TextFormField, '••••••••••'), 'password123');
+
+      await tester.tap(find.text('Iniciar Sesión'));
+      await tester.pumpAndSettle();
+
+      // Debe permanecer en LoginScreen sin navegar
+      expect(find.byType(LoginScreen), findsOneWidget);
+      expect(find.byType(MapHomeScreen), findsNothing);
+
+      LoginScreen.mockSignIn = null;
     });
   });
 }

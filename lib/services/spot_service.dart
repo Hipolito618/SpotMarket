@@ -288,9 +288,12 @@ class SpotService {
       );
     }
 
-    // 1. Obtener ID del usuario autenticado actual (o ID temporal de prueba)
+    // 1. Validación estricta de sesión
     final currentUser = client.auth.currentUser;
-    final userId = currentUser?.id ?? '00000000-0000-0000-0000-000000000000';
+    if (currentUser == null) {
+      throw Exception('No hay una sesión iniciada. Inicia sesión para publicar un spot.');
+    }
+    final userId = currentUser.id;
 
     // Resolver Clave_categoria
     final claveCategoria = await _obtenerClaveCategoria(categoriaNombre ?? tipo);
@@ -332,7 +335,7 @@ class SpotService {
     } else if (tipoNormalizado.contains('reventa') || tipoNormalizado.contains('segunda')) {
       await client.from('reventa').insert({
         'clave_spot': claveSpot,
-        'radio_aprox': radioAprox ?? 300.0,
+        'radio_aprox': (radioAprox ?? 300).round(),
         'zona_referencia': zonaReferencia ?? 'Puntos medios acordados',
       });
     }
