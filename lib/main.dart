@@ -4,6 +4,10 @@ import 'core/config/supabase_config.dart';
 import 'core/controllers/theme_controller.dart';
 import 'core/theme/app_theme.dart';
 import 'screens/auth/login_screen.dart';
+import 'services/connectivity_service.dart';
+import 'services/favorites_service.dart';
+import 'services/pending_queue.dart';
+import 'widgets/connection_banner.dart';
 
 /// Instancia global de SupabaseClient accesible desde toda la aplicación
 final supabase = Supabase.instance.client;
@@ -21,6 +25,11 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Nota de inicialización de Supabase: $e');
   }
+
+  // Servicios del modo offline: estado de red, cola de publicaciones y favoritos locales.
+  await ConnectivityService.instance.iniciar();
+  await PendingQueue.instance.iniciar();
+  await FavoritesService.instance.cargar();
 
   runApp(const SpotMarketApp());
 }
@@ -43,6 +52,9 @@ class SpotMarketApp extends StatelessWidget {
           theme: AppTheme.lightTheme,
           darkTheme: AppTheme.darkTheme,
           themeMode: ThemeController.instance.themeMode,
+          // Franja global de "sin conexión" y de sincronización pendiente.
+          builder: (context, child) =>
+              ConnectionBanner(child: child ?? const SizedBox.shrink()),
           home: const LoginScreen(),
         );
       },

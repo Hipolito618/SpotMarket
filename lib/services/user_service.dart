@@ -1,5 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'connectivity_service.dart';
+import 'local_cache.dart';
+import 'spot_repository.dart';
 import 'spot_service.dart';
 
 /// Modelo con los datos del perfil de usuario en spotMarket
@@ -165,8 +168,42 @@ class UserService {
     }
   }
 
-  /// Ejecuta en paralelo las consultas de perfil y spots propios
+  static const Duration _tiempoMaximo = Duration(seconds: 12);
+
+  /// Obtiene el perfil y los spots propios.
+  /// Con conexión consulta Supabase y respalda el resultado en el dispositivo;
+  /// si la consulta falla, utiliza la última copia guardada.
   static Future<UserFullProfile> obtenerDatosCompletos() async {
+    final currentUser =
+    SpotService.isSupabaseInitialized ? client.auth.currentUser : null;
+
+    if (mockObtenerPerfil == null &&
+        mockObtenerSpots == null &&
+        currentUser != null) {
+      try {
+        final results = await Future.wait([
+          _consultarPerfil(currentUser).timeout(_tiempoMaximo),
+          _consultarSpotsPropios(currentUser.id).timeout(_tiempoMaximo),
+        ]);
+        final perfil = results[0] as UserProfileData;
+        final spots = results[1] as List<Map<String, dynamic>>;
+
+        await LocalCache.guardarPerfil(_perfilAMapa(perfil));
+        await LocalCache.guardarSpotsPropios(spots);
+        return UserFullProfile(perfil: perfil, spots: spots);
+      } catch (e) {
+        debugPrint('Consulta de perfil fallida, se intenta el caché: $e');
+        final perfilCache = await LocalCache.leerPerfil();
+        if (perfilCache != null) {
+          return UserFullProfile(
+            perfil: _perfilDesdeCache(perfilCache),
+            spots: await LocalCache.leerSpotsPropios(),
+          );
+        }
+      }
+    }
+
+    // Sin sesión, en pruebas o sin copia local: comportamiento original.
     final results = await Future.wait([
       obtenerPerfil(),
       obtenerSpotsPropios(),
@@ -175,6 +212,72 @@ class UserService {
     return UserFullProfile(
       perfil: results[0] as UserProfileData,
       spots: results[1] as List<Map<String, dynamic>>,
+    );
+  }
+
+  /// Elimina una publicación propia y actualiza la copia local.
+  /// Devuelve `null` si la operación fue exitosa o un mensaje de error en caso contrario.
+  static Future<String?> eliminarSpot(
+      dynamic claveSpot,
+      List<Map<String, dynamic>> restantes,
+      ) async {
+    if (!ConnectivityService.instance.isOnline.value) {
+      return 'Esta acción requiere conexión a internet.';
+    }
+    try {
+      await SpotRepository.eliminarSpot(claveSpot);
+      await LocalCache.guardarSpotsPropios(restantes);
+      return null;
+    } catch (e) {
+      debugPrint('Error al eliminar la publicación: $e');
+      return 'No se pudo eliminar la publicación. Inténtalo de nuevo.';
+    }
+  }
+
+  static Future<UserProfileData> _consultarPerfil(User usuario) async {
+    final response = await client
+        .from('usuario')
+        .select('*, rol(*)')
+        .eq('clave_usuario', usuario.id)
+        .single();
+    return UserProfileData.fromMap(response, defaultEmail: usuario.email);
+  }
+
+  static Future<List<Map<String, dynamic>>> _consultarSpotsPropios(
+      String usuarioId,
+      ) async {
+    final response = await client
+        .from('spot')
+        .select('*, foto_spot(*)')
+        .eq('clave_usuario', usuarioId)
+        .order('fecha_publicacion', ascending: false);
+
+    final list = response as List<dynamic>;
+    return list.map((item) => Map<String, dynamic>.from(item as Map)).toList();
+  }
+
+  static Map<String, dynamic> _perfilAMapa(UserProfileData perfil) => {
+    'id': perfil.id,
+    'nombre': perfil.nombre,
+    'correo': perfil.correo,
+    'fotoPerfil': perfil.fotoPerfil,
+    'rolNombre': perfil.rolNombre,
+    'reputacion': perfil.reputacion,
+    'fechaRegistro': perfil.fechaRegistro.toIso8601String(),
+  };
+
+  static UserProfileData _perfilDesdeCache(Map<String, dynamic> mapa) {
+    return UserProfileData(
+      id: (mapa['id'] ?? '').toString(),
+      nombre: (mapa['nombre'] ?? 'Usuario').toString(),
+      correo: (mapa['correo'] ?? '').toString(),
+      fotoPerfil: mapa['fotoPerfil']?.toString(),
+      rolNombre: (mapa['rolNombre'] ?? 'Vecino').toString(),
+      reputacion:
+      double.tryParse((mapa['reputacion'] ?? '5').toString()) ?? 5.0,
+      fechaRegistro:
+      DateTime.tryParse((mapa['fechaRegistro'] ?? '').toString()) ??
+          DateTime.now(),
     );
   }
 

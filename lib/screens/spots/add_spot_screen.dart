@@ -7,7 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' hide Path;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_colors.dart';
-import '../../services/spot_service.dart';
+import '../../services/pending_queue.dart';
 
 /// Tipos de venta seleccionables en el formulario
 enum SaleType { bazar, food, reseller }
@@ -268,31 +268,31 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
     });
 
     try {
-      // Paso A: Subir archivos de imágenes a Supabase Storage (bucket 'spots-media')
-      final uploadedUrls = await SpotService.subirImagenesStorage(_selectedFiles);
-
-      // Extraer precio especificado por el usuario o usar 40.0 como valor base
+      // Precio indicado por el usuario; 40.0 como valor base si se deja vacío.
       final priceClean = _priceController.text.trim().replaceAll('\$', '').replaceAll(',', '');
       final double resolvedPrice = double.tryParse(priceClean) ?? 40.0;
 
-      // Paso B: Publicar en la base de datos Supabase (Spot, Detalle y Foto_spot)
-      final createdSpot = await SpotService.publicarSpot(
-        titulo: title,
-        precio: resolvedPrice,
-        latitud: _selectedLocation.latitude,
-        longitud: _selectedLocation.longitude,
-        tipo: tipoStr,
-        categoriaNombre: category,
-        descripcion: _descriptionController.text.trim(),
-        direccionExacta: !isReseller ? _exactAddressController.text.trim() : null,
-        tieneEnvio: _selectedType == SaleType.food ? _hasDelivery : null,
-        costoEnvio: (_selectedType == SaleType.food && _hasDelivery)
-            ? _deliveryCostController.text.trim()
-            : null,
-        horario: _selectedType == SaleType.bazar ? '10:00 - 18:00' : null,
-        radioAprox: 300.0,
-        zonaReferencia: isReseller ? _meetingPointsController.text.trim() : null,
-        fotosUrls: uploadedUrls,
+      // Publica en línea o, sin conexión, guarda la publicación en la cola local.
+      final resultado = await PendingQueue.instance.publicar(
+        PendingSpot(
+          titulo: title,
+          precio: resolvedPrice,
+          latitud: _selectedLocation.latitude,
+          longitud: _selectedLocation.longitude,
+          tipo: tipoStr,
+          categoriaNombre: category,
+          descripcion: _descriptionController.text.trim(),
+          direccionExacta: !isReseller ? _exactAddressController.text.trim() : null,
+          tieneEnvio: _selectedType == SaleType.food ? _hasDelivery : null,
+          costoEnvio: (_selectedType == SaleType.food && _hasDelivery)
+              ? _deliveryCostController.text.trim()
+              : null,
+          horario: _selectedType == SaleType.bazar ? '10:00 - 18:00' : null,
+          radioAprox: 300.0,
+          zonaReferencia: isReseller ? _meetingPointsController.text.trim() : null,
+          fotosPaths: _selectedFiles.map((f) => f.path).toList(),
+        ),
+        List.of(_selectedFiles),
       );
 
       if (!mounted) return;
@@ -300,14 +300,20 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('¡Punto publicado exitosamente en el mapa!'),
-          backgroundColor: const Color(0xFF1B7F4B),
+          content: Text(
+            resultado.pendiente
+                ? 'Sin conexión: la publicación se enviará automáticamente al reconectar.'
+                : '¡Punto publicado exitosamente en el mapa!',
+          ),
+          backgroundColor: resultado.pendiente
+              ? const Color(0xFFF05A24)
+              : const Color(0xFF1B7F4B),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
 
-      Navigator.pop(context, createdSpot);
+      Navigator.pop(context, resultado.spot);
     } on PostgrestException catch (e) {
       debugPrint('Error de PostgREST al publicar spot: ${e.message} (código: ${e.code})');
       if (!mounted) return;
@@ -332,7 +338,7 @@ class _AddSpotScreenState extends State<AddSpotScreen> {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error al publicar: ${e.toString()}'),
+          content: const Text('No se pudo publicar. Verifica tu conexión e inténtalo de nuevo.'),
           backgroundColor: Colors.redAccent,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

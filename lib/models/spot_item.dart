@@ -85,5 +85,53 @@ class SpotItem {
       deliveryCost: deliveryCost ?? this.deliveryCost,
     );
   }
+
+  /// Convierte el spot a un mapa serializable (JSON) para el caché local.
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'price': price,
+      'type': type.name,
+      'category': category,
+      'distance': distance,
+      'exactAddress': exactAddress,
+      'meetingPoints': meetingPoints,
+      'imageUrl': imageUrl,
+      'lat': position?.latitude,
+      'lng': position?.longitude,
+      'description': description,
+      'isOpen': isOpen,
+      'hasDelivery': hasDelivery,
+      'deliveryCost': deliveryCost,
+    };
+  }
+
+  /// Reconstruye un spot a partir de un mapa generado por [toMap].
+  factory SpotItem.fromMap(Map<String, dynamic> map) {
+    final lat = (map['lat'] as num?)?.toDouble();
+    final lng = (map['lng'] as num?)?.toDouble();
+
+    return SpotItem(
+      id: map['id'].toString(),
+      title: (map['title'] ?? '').toString(),
+      price: (map['price'] as num?)?.toDouble() ?? 0.0,
+      type: SpotType.values.firstWhere(
+            (t) => t.name == map['type'],
+        orElse: () => SpotType.localBusiness,
+      ),
+      category: (map['category'] ?? '').toString(),
+      distance: (map['distance'] ?? '').toString(),
+      exactAddress: map['exactAddress'] as String?,
+      meetingPoints:
+      (map['meetingPoints'] as List?)?.map((e) => e.toString()).toList(),
+      imageUrl: map['imageUrl'] as String?,
+      position: (lat != null && lng != null) ? LatLng(lat, lng) : null,
+      description: map['description'] as String?,
+      isOpen: map['isOpen'] as bool? ?? true,
+      hasDelivery: map['hasDelivery'] as bool? ?? false,
+      deliveryCost: map['deliveryCost'] as String?,
+    );
+  }
 }
 
